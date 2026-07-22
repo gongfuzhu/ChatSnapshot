@@ -1,0 +1,142 @@
+{
+    "blocks": [
+        {
+            "url": "favorites",
+            "id": "favoriteModels",
+            "sortBy": "FAVORITED_POSITION",
+            "models": [
+                {
+                    "gender": "female",
+                    "groupShowType": "",
+                    "groupShowTopic": "",
+                    "country": "cn",
+                    "broadcastGender": "female",
+                    "avatarUrl": "/avatars/8/d/9/8d915f4e9b193c0c206a03cbbe50dee7-full",
+                    "genderGroup": "F",
+                    "previewUrlThumbSmall": "/previews/7/1/3/713f0ba82180055aaa1a14a4954cba1f-thumb-small",
+                    "username": "Onechestnut",
+                    "status": "public",
+                    "snapshotTimestamp": "1784733180",
+                    "broadcastSettings": {
+                        "width": 1920,
+                        "height": 1080,
+                        "isSourcePreset": false,
+                        "isBadStream": false
+                    },
+                    "viewersCount": 27,
+                    "topBestPlace": 0,
+                    "publicRecordingsRate": 8,
+                    "privateRate": 0,
+                    "popularSnapshotTimestamp": 1784732420,
+                    "recommendedScore": 1000000223,
+                    "spyRate": 24,
+                    "p2pRate": 0,
+                    "p2pVoiceRate": 0,
+                    "id": 199570657,
+                    "hasGroupShowAnnouncement": false,
+                    "isNonNude": false,
+                    "isHd": true,
+                    "isVr": false,
+                    "isMobile": false,
+                    "isNew": false,
+                    "isLive": true,
+                    "isOnline": true,
+                    "isRecommended": true,
+                    "isTagVerified": false,
+                    "isModel": true,
+                    "isLovense": false,
+                    "isKiiroo": false,
+                    "doSpy": true,
+                    "doPrivate": false,
+                    "isAvatarApproved": true,
+                    "streamName": "199570657",
+                    "presets": [
+                        "480p",
+                        "240p",
+                        "160p_blurred"
+                    ],
+                    "presets265": null,
+                    "presetsAv1": null,
+                    "blockId": "",
+                    "isInFavorites": true,
+                    "statusChangedAt": "2026-07-22T12:07:12Z",
+                    "verifiedSnapshotTimestamp": 1784733050
+                }
+            ]
+        },
+        {
+            "url": "girls/recommended",
+            "id": "recommendedModels",
+            "sortBy": "MODELS_TRENDING",
+            "tagId": "recommended",
+            "models": [
+                {
+                    "gender": "female",
+                    "groupShowType": "",
+                    "groupShowTopic": "",
+                    "country": "",
+                    "broadcastGender": "female",
+                    "avatarUrl": "/avatars/0/f/8/0f870d260c1b1910ae83002d3ad3b4b9-full",
+                    "genderGroup": "F",
+                    "previewUrlThumbSmall": "/previews/d/d/a/ddab13dbcebb35fc57701b0992f4fdbd-thumb-small",
+                    "username": "cuty_lusy",
+                    "status": "public",
+                    "snapshotTimestamp": "1784733180",
+                    "broadcastSettings": {
+                        "width": 720,
+                        "height": 960,
+                        "isSourcePreset": false,
+                        "isBadStream": false
+                    },
+                    "viewersCount": 4,
+                    "topBestPlace": 0,
+                    "publicRecordingsRate": 150,
+                    "privateRate": 16,
+                    "popularSnapshotTimestamp": 1784732878,
+                    "recommendedScore": 1000000299,
+                    "spyRate": 60,
+                    "p2pRate": 24,
+                    "p2pVoiceRate": 0,
+                    "id": 242433118,
+                    "hasGroupShowAnnouncement": false,
+                    "isNonNude": false,
+                    "isHd": true,
+                    "isVr": false,
+                    "isMobile": true,
+                    "isNew": false,
+                    "isLive": true,
+                    "isOnline": true,
+                    "isRecommended": true,
+                    "isTagVerified": false,
+                    "isModel": true,
+                    "isLovense": false,
+                    "isKiiroo": false,
+                    "doSpy": true,
+                    "doPrivate": true,
+                    "isAvatarApproved": true,
+                    "streamName": "242433118",
+                    "presets": [
+                        "480p",
+                        "240p",
+                        "160p_blurred"
+                    ],
+                    "presets265": null,
+                    "presetsAv1": null,
+                    "blockId": "",
+                    "isInFavorites": false,
+                    "statusChangedAt": "2026-07-22T15:01:14Z",
+                    "verifiedSnapshotTimestamp": 1784733058
+                }
+            ]
+        },
+        {
+            "url": "",
+            "id": "topStreamsModels",
+            "sortBy": "ML_RECOMMENDER_SCORE",
+            "models": []
+        }
+    ],
+    "totalCount": 2000,
+    "hasRecommendedModels": true,
+    "updateTimestamp": 1784733168
+}
