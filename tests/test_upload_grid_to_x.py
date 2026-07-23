@@ -1,3 +1,4 @@
+import os
 import socket
 import pytest
 import upload_grid_to_x as ux
@@ -57,3 +58,15 @@ def test_ensure_browser_launches_when_closed(monkeypatch):
     assert proc == "FAKE_PROC"
     assert started is True
     assert calls["launched"] is True
+
+
+def test_generate_grid_creates_file(monkeypatch, tmp_path):
+    from PIL import Image
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ux, "fetch_data", lambda: {"blocks": []})
+    monkeypatch.setattr(ux, "pick_9_covers", lambda data, n: [{"id": 1, "url": "u"}])
+    fake_img = Image.new("RGB", (320, 240), "red")
+    monkeypatch.setattr(ux, "download_images", lambda covers: [fake_img])
+    path = ux.generate_grid()
+    assert os.path.exists(path)
+    assert path.endswith(".jpg")

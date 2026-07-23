@@ -10,6 +10,13 @@ import subprocess
 import sys
 import time
 from datetime import datetime
+from snapshot_grid import (
+    GRID,
+    download_images,
+    fetch_data,
+    make_grid,
+    pick_9_covers,
+)
 
 # 设置 UTF-8 输出，解决 Windows 编码问题
 if sys.stdout.encoding != "utf-8":
@@ -69,3 +76,19 @@ def ensure_browser(port=DEBUG_PORT):
     print(f"[信息] 未检测到调试端口 {port}，启动新的 Chrome")
     proc = launch_chrome(port=port)
     return proc, True
+
+
+def generate_grid():
+    """实时生成一张九宫格图片，返回文件路径。"""
+    data = fetch_data()
+    covers = pick_9_covers(data, n=GRID * GRID)
+    if len(covers) < GRID * GRID:
+        print(f"[警告] 可用模型仅 {len(covers)} 个，不足 9 个，空位将留白。")
+    images = download_images(covers)
+    if not images:
+        print("[错误] 没有任何封面下载成功，退出。", file=sys.stderr)
+        sys.exit(1)
+    out_path = datetime.now().strftime("grid_%Y%m%d_%H%M%S.jpg")
+    make_grid(images, out_path)
+    print(f"[完成] 已生成九宫格: {out_path}（{len(images)} 张封面）")
+    return out_path
