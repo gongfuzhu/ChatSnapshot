@@ -44,3 +44,28 @@ def build_chrome_args(chrome_path, port, user_data_dir):
         f"--remote-debugging-port={port}",
         f"--user-data-dir={user_data_dir}",
     ]
+
+
+def launch_chrome(chrome_path=CHROME_PATH, port=DEBUG_PORT,
+                  user_data_dir=USER_DATA_DIR, wait=15.0):
+    """启动带调试端口的 Chrome，轮询等待端口就绪后返回进程。"""
+    if not os.path.exists(chrome_path):
+        raise FileNotFoundError(f"找不到 Chrome: {chrome_path}")
+    args = build_chrome_args(chrome_path, port, user_data_dir)
+    proc = subprocess.Popen(args)
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        if is_port_open("127.0.0.1", port):
+            return proc
+        time.sleep(0.3)
+    raise TimeoutError(f"Chrome 调试端口 {port} 在 {wait}s 内未就绪")
+
+
+def ensure_browser(port=DEBUG_PORT):
+    """端口已开则复用，否则启动新 Chrome。返回 (proc, started_by_us)。"""
+    if is_port_open("127.0.0.1", port):
+        print(f"[信息] 检测到调试端口 {port} 已开，复用现有浏览器")
+        return None, False
+    print(f"[信息] 未检测到调试端口 {port}，启动新的 Chrome")
+    proc = launch_chrome(port=port)
+    return proc, True

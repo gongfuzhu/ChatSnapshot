@@ -1,4 +1,5 @@
 import socket
+import pytest
 import upload_grid_to_x as ux
 
 
@@ -29,3 +30,30 @@ def test_config_constants_exist():
     assert isinstance(ux.DEBUG_PORT, int)
     assert ux.X_COMPOSE_URL.startswith("https://")
     assert isinstance(ux.POST_TEXT, str)
+
+
+def test_launch_chrome_missing_executable():
+    with pytest.raises(FileNotFoundError):
+        ux.launch_chrome(chrome_path=r"C:\no\such\chrome.exe", port=59998, wait=1.0)
+
+
+def test_ensure_browser_reuses_open_port(monkeypatch):
+    monkeypatch.setattr(ux, "is_port_open", lambda *a, **k: True)
+    proc, started = ux.ensure_browser(port=9222)
+    assert proc is None
+    assert started is False
+
+
+def test_ensure_browser_launches_when_closed(monkeypatch):
+    calls = {}
+
+    def fake_launch(**kwargs):
+        calls["launched"] = True
+        return "FAKE_PROC"
+
+    monkeypatch.setattr(ux, "is_port_open", lambda *a, **k: False)
+    monkeypatch.setattr(ux, "launch_chrome", lambda **k: fake_launch(**k))
+    proc, started = ux.ensure_browser(port=9222)
+    assert proc == "FAKE_PROC"
+    assert started is True
+    assert calls["launched"] is True
