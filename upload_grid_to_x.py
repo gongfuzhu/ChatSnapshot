@@ -33,7 +33,9 @@ USER_DATA_DIR = os.path.join(
     os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "chrome-x-debug"
 )
 X_COMPOSE_URL = "https://x.com/compose/post"
-POST_TEXT = ""  # 可选文案，空则纯图片发帖
+# 发帖文案。可用 {username} 占位符，会被替换为第一张封面的主播用户名。
+# 留空则纯图片发帖。
+POST_TEXT = "正在直播\n Live streaming now. \n ただいま配信中です。 \n  https://zh.streams.modelapp.org/{username}"
 # ========== 配置结束 ==========
 
 
@@ -78,8 +80,22 @@ def ensure_browser(port=DEBUG_PORT):
     return proc, True
 
 
+def build_username_map(data):
+    """从接口数据构建 id -> username 映射。"""
+    umap = {}
+    for block in data.get("blocks", []):
+        for model in block.get("models", []):
+            umap[model["id"]] = model.get("username", "")
+    return umap
+
+
+def render_post_text(template, username):
+    """用 username 替换文案模板里的 {username} 占位符。"""
+    return template.replace("{username}", username)
+
+
 def generate_grid():
-    """实时生成一张九宫格图片，返回文件路径。"""
+    """实时生成一张九宫格图片，返回 (文件路径, 第一张封面的 username)。"""
     data = fetch_data()
     covers = pick_9_covers(data, n=GRID * GRID)
     if len(covers) < GRID * GRID:
@@ -91,14 +107,16 @@ def generate_grid():
     out_path = datetime.now().strftime("grid_%Y%m%d_%H%M%S.jpg")
     make_grid(images, out_path)
     print(f"[完成] 已生成九宫格: {out_path}（{len(images)} 张封面）")
-    return out_path
+    # 取第一张封面对应的 username（用于文案拼接）
+    username = build_username_map(data).get(covers[0]["id"], "")
+    return out_path, username
 
 
 from playwright.sync_api import sync_playwright
 
 
-def upload_image_to_x(page, image_path):
-    """在给定页面上传图片并发布。"""
+def upload_image_to_x(page, image_path, post_text=""):
+    """在给定页面上传图片并发布。post_text 为最终文案（已完成占位符替换）。"""
     page.goto(X_COMPOSE_URL)
     print("已打开发帖页面")
 
@@ -107,8 +125,8 @@ def upload_image_to_x(page, image_path):
         '[data-testid="tweetTextarea_0"]', timeout=10000
     )
     editor.click()
-    if POST_TEXT:
-        editor.type(POST_TEXT)
+    if post_text:
+        editor.type(post_text)
 
     page.wait_for_selector('input[type="file"]', timeout=10000)
     file_input = page.locator('input[type="file"]').first
@@ -133,8 +151,15 @@ def main():
         if not os.path.exists(image_path):
             print(f"[ERROR] 文件不存在: {image_path}")
             sys.exit(1)
+        # 传入现成图片时没有封面数据，username 留空
+        username = ""
     else:
-        image_path = generate_grid()
+        image_path, username = generate_grid()
+
+    # 用 username 渲染文案模板（POST_TEXT 里的 {username} 会被替换）
+    post_text = render_post_text(POST_TEXT, username)
+    if post_text:
+        print(f"[信息] 发帖文案: {post_text}")
 
     proc = None
     started_by_us = False
@@ -146,7 +171,7 @@ def main():
             )
             context = browser.contexts[0]
             page = context.new_page()
-            upload_image_to_x(page, image_path)
+            upload_image_to_x(page, image_path, post_text)
     except Exception as e:
         print(f"[ERROR] 错误: {e}")
         print("\n请确保:")

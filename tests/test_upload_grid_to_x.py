@@ -63,10 +63,35 @@ def test_ensure_browser_launches_when_closed(monkeypatch):
 def test_generate_grid_creates_file(monkeypatch, tmp_path):
     from PIL import Image
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(ux, "fetch_data", lambda: {"blocks": []})
-    monkeypatch.setattr(ux, "pick_9_covers", lambda data, n: [{"id": 1, "url": "u"}])
+    data = {"blocks": [{"models": [{"id": 1, "username": "Alice"}]}]}
+    monkeypatch.setattr(ux, "fetch_data", lambda: data)
+    monkeypatch.setattr(ux, "pick_9_covers", lambda d, n: [{"id": 1, "url": "u"}])
     fake_img = Image.new("RGB", (320, 240), "red")
     monkeypatch.setattr(ux, "download_images", lambda covers: [fake_img])
-    path = ux.generate_grid()
+    path, username = ux.generate_grid()
     assert os.path.exists(path)
     assert path.endswith(".jpg")
+    assert username == "Alice"
+
+
+def test_build_username_map():
+    data = {
+        "blocks": [
+            {"models": [{"id": 1, "username": "Alice"}, {"id": 2, "username": "Bob"}]},
+            {"models": [{"id": 3, "username": "Cara"}]},
+        ]
+    }
+    umap = ux.build_username_map(data)
+    assert umap == {1: "Alice", 2: "Bob", 3: "Cara"}
+
+
+def test_render_post_text_replaces_placeholder():
+    assert ux.render_post_text("hi {username}!", "Alice") == "hi Alice!"
+
+
+def test_render_post_text_no_placeholder_unchanged():
+    assert ux.render_post_text("no placeholder", "Alice") == "no placeholder"
+
+
+def test_render_post_text_empty_username():
+    assert ux.render_post_text("hi {username}", "") == "hi "
