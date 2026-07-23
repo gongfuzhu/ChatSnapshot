@@ -92,3 +92,73 @@ def generate_grid():
     make_grid(images, out_path)
     print(f"[完成] 已生成九宫格: {out_path}（{len(images)} 张封面）")
     return out_path
+
+
+from playwright.sync_api import sync_playwright
+
+
+def upload_image_to_x(page, image_path):
+    """在给定页面上传图片并发布。"""
+    page.goto(X_COMPOSE_URL)
+    print("已打开发帖页面")
+
+    if POST_TEXT:
+        editor = page.wait_for_selector(
+            '[data-testid="tweetTextarea_0"]', timeout=10000
+        )
+        editor.click()
+        editor.type(POST_TEXT)
+
+    page.wait_for_selector('input[type="file"]', timeout=10000)
+    file_input = page.locator('input[type="file"]').first
+    file_input.set_input_files(image_path)
+    print(f"图片上传中: {os.path.basename(image_path)}")
+
+    # 图片渲染比视频快，稍等后等待发布按钮可用
+    page.wait_for_timeout(3000)
+    page.wait_for_selector(
+        '[data-testid="tweetButton"]:not([disabled])', timeout=60000
+    )
+    print("图片处理完成，正在发布...")
+    page.locator('[data-testid="tweetButton"]:not([disabled])').click()
+    print("[OK] 发布成功!")
+    page.wait_for_timeout(3000)
+
+
+def main():
+    # 获取图片路径：指定则用指定的，否则实时生成
+    if len(sys.argv) > 1:
+        image_path = sys.argv[1]
+        if not os.path.exists(image_path):
+            print(f"[ERROR] 文件不存在: {image_path}")
+            sys.exit(1)
+    else:
+        image_path = generate_grid()
+
+    proc = None
+    started_by_us = False
+    try:
+        proc, started_by_us = ensure_browser(port=DEBUG_PORT)
+        with sync_playwright() as p:
+            browser = p.chromium.connect_over_cdp(
+                f"http://127.0.0.1:{DEBUG_PORT}"
+            )
+            context = browser.contexts[0]
+            page = context.new_page()
+            upload_image_to_x(page, image_path)
+    except Exception as e:
+        print(f"[ERROR] 错误: {e}")
+        print("\n请确保:")
+        print("1. Chrome 路径正确（脚本顶部 CHROME_PATH）")
+        print("2. 已在该 Chrome 配置中登录了 X 账号")
+        print(f"   （首次使用独立目录 {USER_DATA_DIR} 需手动登录一次）")
+        sys.exit(1)
+    finally:
+        # 自己启动的浏览器发帖后关闭；复用已有的保持不动
+        if started_by_us and proc is not None:
+            proc.terminate()
+            print("[信息] 已关闭本脚本启动的 Chrome")
+
+
+if __name__ == "__main__":
+    main()
