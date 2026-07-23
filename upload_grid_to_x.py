@@ -102,11 +102,12 @@ def upload_image_to_x(page, image_path):
     page.goto(X_COMPOSE_URL)
     print("已打开发帖页面")
 
+    # 先等编辑区就绪并聚焦，确保页面可交互（即使不填文案）
+    editor = page.wait_for_selector(
+        '[data-testid="tweetTextarea_0"]', timeout=10000
+    )
+    editor.click()
     if POST_TEXT:
-        editor = page.wait_for_selector(
-            '[data-testid="tweetTextarea_0"]', timeout=10000
-        )
-        editor.click()
         editor.type(POST_TEXT)
 
     page.wait_for_selector('input[type="file"]', timeout=10000)
