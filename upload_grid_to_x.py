@@ -234,7 +234,7 @@ def upload_media_to_x(page, media_path, post_text=""):
     print(f"上传媒体: {abs_path} ({os.path.getsize(abs_path)} 字节)")
     file_input.set_input_files(abs_path)
 
-    # 等待媒体出现在编辑区（通过检测图片预览元素）
+    # 等待媒体出现在编辑区（通过检测媒体预览元素）
     print("等待媒体上传完成...")
     try:
         # X 上传完成后会有预览：图片为 img，视频为 video

@@ -10,6 +10,7 @@ import sys
 from datetime import datetime
 
 import requests
+from playwright.sync_api import sync_playwright
 
 from upload_grid_to_x import (
     DEBUG_PORT,
@@ -108,9 +109,11 @@ def record_stream(stream_url, out_path, seconds=RECORD_SECONDS):
     )
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg 录制失败: {result.stderr[-500:]}")
+    if not os.path.exists(out_path) or os.path.getsize(out_path) < 10 * 1024:
+        raise RuntimeError(f"录制结果异常（文件过小或不存在）: {out_path}")
 
 
-def generate_video():
+def generate_video(out_path=None):
     """选流并录制，返回 (视频路径, username, stream_url)。数据不足时报错退出。"""
     data = fetch_recommended()
     model = pick_top_streamer(data.get("models", []))
@@ -122,7 +125,11 @@ def generate_video():
         print("[错误] 直播间没有可用的 480p 流地址，退出。", file=sys.stderr)
         sys.exit(1)
     username = model.get("username", "")
-    out_path = datetime.now().strftime("stream_%Y%m%d_%H%M%S.mp4")
+    if not username:
+        print("[错误] 直播间没有 username，退出。", file=sys.stderr)
+        sys.exit(1)
+    if out_path is None:
+        out_path = datetime.now().strftime("stream_%Y%m%d_%H%M%S.mp4")
     print(f"[信息] 选定直播间: {username}（观看 {model.get('viewersCount', 0)}）")
     record_stream(stream_url, out_path, RECORD_SECONDS)
     print(f"[完成] 已录制视频: {out_path}")
@@ -130,15 +137,15 @@ def generate_video():
 
 
 def main():
-    video_path, username, _ = generate_video()
-    post_text = render_post_text(POST_TEXT, username)
-    print(f"[信息] 发帖文案: {post_text}")
-
+    video_path = datetime.now().strftime("stream_%Y%m%d_%H%M%S.mp4")
     proc = None
     started_by_us = False
     try:
+        _, username, _ = generate_video(out_path=video_path)
+        post_text = render_post_text(POST_TEXT, username)
+        print(f"[信息] 发帖文案: {post_text}")
+
         proc, started_by_us = ensure_browser(port=DEBUG_PORT)
-        from playwright.sync_api import sync_playwright
 
         with sync_playwright() as p:
             browser = p.chromium.connect_over_cdp(
@@ -157,7 +164,7 @@ def main():
         sys.exit(1)
     finally:
         # 临时视频用完即删
-        if os.path.exists(video_path):
+        if video_path and os.path.exists(video_path):
             os.remove(video_path)
             print(f"[信息] 已删除临时视频: {video_path}")
         # 自己启动的浏览器发帖后关闭；复用已有的保持不动

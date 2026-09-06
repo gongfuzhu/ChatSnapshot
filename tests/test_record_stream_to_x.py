@@ -129,3 +129,35 @@ def test_generate_video_no_stream_url_exits(monkeypatch):
 
 def test_post_text_render():
     assert rs.render_post_text(rs.POST_TEXT, "enya-") == "直播间：enya-"
+
+
+def test_main_cleans_up_when_record_fails(monkeypatch, tmp_path):
+    """录制失败（generate_video 抛出）时，main 的 finally 应清理残留视频文件。"""
+    monkeypatch.chdir(tmp_path)
+    # 固定 datetime.now() 返回值，使 video_path 可预测
+    fixed_ts = rs.datetime(2026, 1, 2, 3, 4, 5)
+
+    class FakeDatetime:
+        @classmethod
+        def now(cls):
+            return fixed_ts
+
+        def __getattr__(self, name):
+            return getattr(rs.datetime, name)
+
+    monkeypatch.setattr(rs, "datetime", FakeDatetime)
+    expected_name = "stream_20260102_030405.mp4"
+    expected_path = tmp_path / expected_name
+
+    def fake_generate_video(out_path=None):
+        # 模拟 generate_video 录制到一半创建了文件然后失败
+        with open(expected_path, "wb") as f:
+            f.write(b"x" * 100)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(rs, "generate_video", fake_generate_video)
+
+    with pytest.raises(SystemExit):
+        rs.main()
+
+    assert not expected_path.exists(), "录制失败后临时视频应被清理"
