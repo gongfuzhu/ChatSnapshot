@@ -8,3 +8,6 @@ venv/
 
 # 生成的九宫格图片
 grid_*.jpg
+
+# X API 凭证（敏感，不要提交）
+x_config.py

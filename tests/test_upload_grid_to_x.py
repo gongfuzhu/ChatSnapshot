@@ -1,11 +1,17 @@
 import os
 import socket
+import sys
+import tempfile
+
 import pytest
+from PIL import Image
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import upload_grid_to_x as ux
 
 
 def test_is_port_open_false_on_unused_port():
-    # 选一个几乎不可能被占用的高位端口
     assert ux.is_port_open("127.0.0.1", 59999, timeout=0.2) is False
 
 
@@ -21,21 +27,28 @@ def test_is_port_open_true_on_listening_socket():
 
 
 def test_build_chrome_args_contains_flags():
-    args = ux.build_chrome_args(r"C:\chrome.exe", 9222, r"C:\data")
-    assert args[0] == r"C:\chrome.exe"
+    args = ux.build_chrome_args("/usr/bin/chrome", 9222, "/tmp/data", "http://proxy:7890")
+    assert args[0] == "/usr/bin/chrome"
     assert "--remote-debugging-port=9222" in args
-    assert r"--user-data-dir=C:\data" in args
+    assert "--user-data-dir=/tmp/data" in args
+    assert "--proxy-server=http://proxy:7890" in args
+
+
+def test_build_chrome_args_no_proxy():
+    args = ux.build_chrome_args("/usr/bin/chrome", 9222, "/tmp/data", "")
+    assert "--proxy-server=" not in " ".join(args)
 
 
 def test_config_constants_exist():
     assert isinstance(ux.DEBUG_PORT, int)
-    assert ux.X_COMPOSE_URL.startswith("https://")
     assert isinstance(ux.POST_TEXT, str)
+    assert isinstance(ux.PROXY, str)
+    assert isinstance(ux.CHROME_PATH, str)
 
 
 def test_launch_chrome_missing_executable():
     with pytest.raises(FileNotFoundError):
-        ux.launch_chrome(chrome_path=r"C:\no\such\chrome.exe", port=59998, wait=1.0)
+        ux.launch_chrome(chrome_path="/no/such/chrome", port=59998, wait=0.1)
 
 
 def test_ensure_browser_reuses_open_port(monkeypatch):
@@ -61,7 +74,6 @@ def test_ensure_browser_launches_when_closed(monkeypatch):
 
 
 def test_generate_grid_creates_file(monkeypatch, tmp_path):
-    from PIL import Image
     monkeypatch.chdir(tmp_path)
     data = {"blocks": [{"models": [{"id": 1, "username": "Alice"}]}]}
     monkeypatch.setattr(ux, "fetch_data", lambda: data)
