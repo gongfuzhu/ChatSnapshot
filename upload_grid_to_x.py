@@ -212,10 +212,40 @@ def generate_grid():
     return out_path, username
 
 
+def _dismiss_x_popups(page):
+    """尝试关闭 X 页面上可能出现的弹窗（通知、Cookie、欢迎等）。
+    这些弹窗会用 mask 遮罩挡住发布按钮，导致点击失败。"""
+    # 常见的关闭按钮
+    selectors = [
+        '[data-testid="app-bar-close"]',     # 欢迎/引导弹窗关闭
+        '[data-testid="xMigrationBottomBar"]', # 底部迁移提示栏
+        '[data-testid="confirmationSheetDismiss"]', # 确认弹窗取消
+        'button[aria-label="关闭"]',
+        'button[aria-label="Close"]',
+    ]
+    for sel in selectors:
+        try:
+            btn = page.locator(sel).first
+            if btn.is_visible(timeout=1000):
+                btn.click()
+                page.wait_for_timeout(500)
+        except Exception:
+            pass
+
+
 def upload_media_to_x(page, media_path, post_text=""):
     """在给定页面上传媒体（图片或视频）并发布。post_text 为最终文案（已完成占位符替换）。"""
+    # 先去首页，确保登录态正常、页面完全加载，避免直接跳发帖页时状态异常
+    page.goto("https://x.com/home", wait_until="domcontentloaded")
+    page.wait_for_timeout(3000)
+    print("已进入首页")
+
     page.goto("https://x.com/compose/post")
     print("已打开发帖页面")
+    page.wait_for_timeout(2000)
+
+    # 先关掉可能挡住页面的弹窗
+    _dismiss_x_popups(page)
 
     # 先聚焦编辑区，确保页面可交互
     editor = page.wait_for_selector(
@@ -256,11 +286,26 @@ def upload_media_to_x(page, media_path, post_text=""):
     page.wait_for_timeout(3000)
 
     # 等待发布按钮可用（视频转码慢，上限放宽）
-    page.wait_for_selector(
-        '[data-testid="tweetButton"]:not([disabled])', timeout=120000
-    )
-    print("发布按钮可用，正在发布...")
-    page.locator('[data-testid="tweetButton"]:not([disabled])').click()
+    # X 页面结构可能变化，同时匹配多个可能的按钮选择器
+    tweet_btn_selectors = [
+        '[data-testid="tweetButtonInline"]:not([disabled])',
+        '[data-testid="tweetButton"]:not([disabled])',
+        'button[data-testid^="tweetButton"]:not([disabled])',
+    ]
+    for i, sel in enumerate(tweet_btn_selectors):
+        try:
+            page.wait_for_selector(sel, timeout=5000 if i < len(tweet_btn_selectors)-1 else 120000)
+            print(f"发布按钮可用（选择器 {i}），正在发布...")
+            # 用 JS 直接点击，避免 mask 遮罩导致 Playwright 认为被拦截
+            page.evaluate(f'''() => {{
+                const btn = document.querySelector('{sel.split(':not')[0]}');
+                if (btn && !btn.disabled) btn.click();
+            }}''')
+            break
+        except Exception as e:
+            if i == len(tweet_btn_selectors) - 1:
+                raise e
+            continue
     print("[OK] 发布成功!")
     page.wait_for_timeout(3000)
 

@@ -86,7 +86,7 @@ def build_ffmpeg_args(stream_url, out_path, seconds, proxy=PROXY):
         "-headers", "Referer: https://creative.whitetrafsa.com/\r\n",
     ]
     if proxy:
-        args += ["-proxy", proxy]
+        args += ["-http_proxy", proxy]
     args += [
         "-i", stream_url,
         "-t", str(seconds),
