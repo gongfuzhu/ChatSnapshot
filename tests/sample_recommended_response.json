@@ -1,0 +1,41 @@
+{
+    "count": 3,
+    "models": [
+        {
+            "id": 70032198,
+            "username": "enya-",
+            "status": "public",
+            "viewersCount": 2648,
+            "stream": {
+                "url": "https://edge-hls.example.com/hls/70032198/master/70032198_480p.m3u8",
+                "urls": {
+                    "480p": "https://edge-hls.example.com/hls/70032198/master/70032198_480p.m3u8"
+                }
+            }
+        },
+        {
+            "id": 70032199,
+            "username": "bella-",
+            "status": "private",
+            "viewersCount": 9000,
+            "stream": {
+                "url": "https://edge-hls.example.com/hls/70032199/master/70032199_480p.m3u8",
+                "urls": {
+                    "480p": "https://edge-hls.example.com/hls/70032199/master/70032199_480p.m3u8"
+                }
+            }
+        },
+        {
+            "id": 70032200,
+            "username": "cara-",
+            "status": "public",
+            "viewersCount": 5000,
+            "stream": {
+                "url": "https://edge-hls.example.com/hls/70032200/master/70032200_480p.m3u8",
+                "urls": {
+                    "480p": "https://edge-hls.example.com/hls/70032200/master/70032200_480p.m3u8"
+                }
+            }
+        }
+    ]
+}
