@@ -7,10 +7,16 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 
 import requests
 
-from upload_grid_to_x import render_post_text
+from upload_grid_to_x import (
+    DEBUG_PORT,
+    ensure_browser,
+    render_post_text,
+    upload_media_to_x,
+)
 
 # 设置 UTF-8 输出
 if sys.stdout.encoding != "utf-8":
@@ -102,3 +108,63 @@ def record_stream(stream_url, out_path, seconds=RECORD_SECONDS):
     )
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg 录制失败: {result.stderr[-500:]}")
+
+
+def generate_video():
+    """选流并录制，返回 (视频路径, username, stream_url)。数据不足时报错退出。"""
+    data = fetch_recommended()
+    model = pick_top_streamer(data.get("models", []))
+    if model is None:
+        print("[错误] 推荐接口没有可用直播间，退出。", file=sys.stderr)
+        sys.exit(1)
+    stream_url = extract_stream_url(model)
+    if not stream_url:
+        print("[错误] 直播间没有可用的 480p 流地址，退出。", file=sys.stderr)
+        sys.exit(1)
+    username = model.get("username", "")
+    out_path = datetime.now().strftime("stream_%Y%m%d_%H%M%S.mp4")
+    print(f"[信息] 选定直播间: {username}（观看 {model.get('viewersCount', 0)}）")
+    record_stream(stream_url, out_path, RECORD_SECONDS)
+    print(f"[完成] 已录制视频: {out_path}")
+    return out_path, username, stream_url
+
+
+def main():
+    video_path, username, _ = generate_video()
+    post_text = render_post_text(POST_TEXT, username)
+    print(f"[信息] 发帖文案: {post_text}")
+
+    proc = None
+    started_by_us = False
+    try:
+        proc, started_by_us = ensure_browser(port=DEBUG_PORT)
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.connect_over_cdp(
+                f"http://127.0.0.1:{DEBUG_PORT}"
+            )
+            context = browser.contexts[0]
+            page = context.new_page()
+            upload_media_to_x(page, video_path, post_text)
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"[ERROR] 错误: {e}", file=sys.stderr)
+        print("\n请确保:")
+        print("1. 系统已安装 ffmpeg 并在 PATH 中")
+        print("2. Chrome 调试端口可用，且已登录 X 账号")
+        sys.exit(1)
+    finally:
+        # 临时视频用完即删
+        if os.path.exists(video_path):
+            os.remove(video_path)
+            print(f"[信息] 已删除临时视频: {video_path}")
+        # 自己启动的浏览器发帖后关闭；复用已有的保持不动
+        if started_by_us and proc is not None:
+            proc.terminate()
+            print("[信息] 已关闭本脚本启动的 Chrome")
+
+
+if __name__ == "__main__":
+    main()

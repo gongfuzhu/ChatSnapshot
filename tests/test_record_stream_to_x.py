@@ -102,3 +102,30 @@ def test_record_stream_missing_ffmpeg(monkeypatch):
     monkeypatch.setattr(rs.shutil, "which", lambda name: None)
     with pytest.raises(FileNotFoundError):
         rs.record_stream("https://x/master.m3u8", "out.mp4")
+
+
+def test_generate_video_picks_records_and_returns(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(rs, "fetch_recommended", lambda: SAMPLE)
+    monkeypatch.setattr(rs, "record_stream", lambda url, path, seconds: None)
+    path, username, stream_url = rs.generate_video()
+    assert username == "cara-"
+    assert stream_url == SAMPLE["models"][2]["stream"]["urls"]["480p"]
+    assert path.endswith(".mp4")
+
+
+def test_generate_video_no_models_exits(monkeypatch):
+    monkeypatch.setattr(rs, "fetch_recommended", lambda: {"models": []})
+    with pytest.raises(SystemExit):
+        rs.generate_video()
+
+
+def test_generate_video_no_stream_url_exits(monkeypatch):
+    data = {"models": [{"id": 1, "username": "a", "status": "public", "viewersCount": 1}]}
+    monkeypatch.setattr(rs, "fetch_recommended", lambda: data)
+    with pytest.raises(SystemExit):
+        rs.generate_video()
+
+
+def test_post_text_render():
+    assert rs.render_post_text(rs.POST_TEXT, "enya-") == "直播间：enya-"
