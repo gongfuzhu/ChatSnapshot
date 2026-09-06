@@ -4,6 +4,8 @@
       → ffmpeg 录制 480p 流 15 秒 → 复用 upload_grid_to_x 浏览器编排发帖。
 """
 import os
+import shutil
+import subprocess
 import sys
 
 import requests
@@ -62,3 +64,41 @@ def pick_top_streamer(models):
     public = [m for m in models if m.get("status") == "public"]
     pool = public if public else models
     return max(pool, key=lambda m: m.get("viewersCount", 0))
+
+
+def extract_stream_url(model):
+    """取 480p 流地址，缺失时兜底 stream.url，均无返回空字符串。"""
+    stream = model.get("stream", {})
+    return stream.get("urls", {}).get("480p", "") or stream.get("url", "")
+
+
+def build_ffmpeg_args(stream_url, out_path, seconds, proxy=PROXY):
+    """构造 ffmpeg 拉流录制命令。重编码为 H.264/AAC，满足 X 上传要求。"""
+    args = [
+        "ffmpeg", "-y",
+        "-headers", "Referer: https://creative.whitetrafsa.com/\r\n",
+    ]
+    if proxy:
+        args += ["-proxy", proxy]
+    args += [
+        "-i", stream_url,
+        "-t", str(seconds),
+        "-c:v", "libx264", "-c:a", "aac",
+        "-movflags", "+faststart",
+        out_path,
+    ]
+    return args
+
+
+def record_stream(stream_url, out_path, seconds=RECORD_SECONDS):
+    """调用 ffmpeg 录制 HLS 流为 mp4。ffmpeg 缺失抛 FileNotFoundError，录制失败抛 RuntimeError。"""
+    if not shutil.which("ffmpeg"):
+        raise FileNotFoundError(
+            "未找到 ffmpeg，请先安装（如 winget install ffmpeg 或 apt install ffmpeg）"
+        )
+    result = subprocess.run(
+        build_ffmpeg_args(stream_url, out_path, seconds),
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg 录制失败: {result.stderr[-500:]}")

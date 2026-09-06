@@ -61,3 +61,44 @@ def test_config_constants_exist():
     assert rs.POST_TEXT == "直播间：{username}"
     assert isinstance(rs.API_URL, str)
     assert "go.whitetrafsa.com/api/models" in rs.API_URL
+
+
+def test_extract_stream_url_480p():
+    model = SAMPLE["models"][0]
+    assert rs.extract_stream_url(model) == model["stream"]["urls"]["480p"]
+
+
+def test_extract_stream_url_fallback_to_stream_url():
+    model = {"stream": {"url": "https://x/master.m3u8"}}
+    assert rs.extract_stream_url(model) == "https://x/master.m3u8"
+
+
+def test_extract_stream_url_missing():
+    assert rs.extract_stream_url({}) == ""
+
+
+def test_build_ffmpeg_args_contains_required_flags():
+    args = rs.build_ffmpeg_args(
+        "https://x/master.m3u8", "out.mp4", 15, proxy="http://127.0.0.1:7890"
+    )
+    joined = " ".join(args)
+    assert args[0] == "ffmpeg"
+    assert "-y" in args
+    assert "https://x/master.m3u8" in args
+    assert "-t" in args and "15" in args
+    assert "-c:v" in args and "libx264" in args
+    assert "-c:a" in args and "aac" in args
+    assert "+faststart" in joined
+    assert "-proxy" in args and "http://127.0.0.1:7890" in args
+    assert args[-1] == "out.mp4"
+
+
+def test_build_ffmpeg_args_no_proxy():
+    args = rs.build_ffmpeg_args("https://x/master.m3u8", "out.mp4", 15, proxy="")
+    assert "-proxy" not in args
+
+
+def test_record_stream_missing_ffmpeg(monkeypatch):
+    monkeypatch.setattr(rs.shutil, "which", lambda name: None)
+    with pytest.raises(FileNotFoundError):
+        rs.record_stream("https://x/master.m3u8", "out.mp4")
