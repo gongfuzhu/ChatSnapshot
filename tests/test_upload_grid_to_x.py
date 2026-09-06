@@ -107,3 +107,8 @@ def test_render_post_text_no_placeholder_unchanged():
 
 def test_render_post_text_empty_username():
     assert ux.render_post_text("hi {username}", "") == "hi "
+
+
+def test_upload_media_to_x_exists_and_old_name_gone():
+    assert hasattr(ux, "upload_media_to_x")
+    assert not hasattr(ux, "upload_image_to_x")

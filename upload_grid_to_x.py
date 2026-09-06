@@ -212,8 +212,8 @@ def generate_grid():
     return out_path, username
 
 
-def upload_image_to_x(page, image_path, post_text=""):
-    """在给定页面上传图片并发布。post_text 为最终文案（已完成占位符替换）。"""
+def upload_media_to_x(page, media_path, post_text=""):
+    """在给定页面上传媒体（图片或视频）并发布。post_text 为最终文案（已完成占位符替换）。"""
     page.goto("https://x.com/compose/post")
     print("已打开发帖页面")
 
@@ -225,26 +225,28 @@ def upload_image_to_x(page, image_path, post_text=""):
     if post_text:
         editor.type(post_text)
 
-    # 上传图片
+    # 上传媒体
     page.wait_for_selector('input[type="file"]', timeout=10000)
     file_input = page.locator('input[type="file"]').first
 
     # 用绝对路径，避免工作目录问题
-    abs_path = os.path.abspath(image_path)
-    print(f"上传图片: {abs_path} ({os.path.getsize(abs_path)} 字节)")
+    abs_path = os.path.abspath(media_path)
+    print(f"上传媒体: {abs_path} ({os.path.getsize(abs_path)} 字节)")
     file_input.set_input_files(abs_path)
 
-    # 等待图片出现在编辑区（通过检测图片预览元素）
-    print("等待图片上传完成...")
+    # 等待媒体出现在编辑区（通过检测图片预览元素）
+    print("等待媒体上传完成...")
     try:
-        # X 上传完成后会有图片预览，检测 alt 属性或 img 元素
+        # X 上传完成后会有预览：图片为 img，视频为 video
         page.wait_for_selector(
-            '[data-testid="attachments"] img, [data-testid="filePreview"]',
-            timeout=30000
+            '[data-testid="attachments"] img, '
+            '[data-testid="attachments"] video, '
+            '[data-testid="filePreview"]',
+            timeout=90000,  # 视频处理比图片慢，上限放宽
         )
-        print("✅ 图片预览出现，上传成功")
+        print("✅ 媒体预览出现，上传成功")
     except Exception as e:
-        print(f"⚠️ 未检测到图片预览元素: {e}")
+        print(f"⚠️ 未检测到媒体预览元素: {e}")
         # 截个图看看实际情况
         debug_path = f"debug_upload_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
         page.screenshot(path=debug_path, full_page=True)
@@ -253,9 +255,9 @@ def upload_image_to_x(page, image_path, post_text=""):
     # 再多等几秒确保处理完成
     page.wait_for_timeout(3000)
 
-    # 等待发布按钮可用
+    # 等待发布按钮可用（视频转码慢，上限放宽）
     page.wait_for_selector(
-        '[data-testid="tweetButton"]:not([disabled])', timeout=60000
+        '[data-testid="tweetButton"]:not([disabled])', timeout=120000
     )
     print("发布按钮可用，正在发布...")
     page.locator('[data-testid="tweetButton"]:not([disabled])').click()
@@ -288,7 +290,7 @@ def main():
             )
             context = browser.contexts[0]
             page = context.new_page()
-            upload_image_to_x(page, image_path, post_text)
+            upload_media_to_x(page, image_path, post_text)
     except Exception as e:
         print(f"[ERROR] 错误: {e}", file=sys.stderr)
         print("\n请确保:")
