@@ -312,6 +312,7 @@ def upload_media_to_x(page, media_path, post_text=""):
 
 def main():
     # 获取图片路径：指定则用指定的，否则实时生成
+    generated_by_us = False
     if len(sys.argv) > 1:
         image_path = sys.argv[1]
         if not os.path.exists(image_path):
@@ -320,6 +321,7 @@ def main():
         username = ""
     else:
         image_path, username = generate_grid()
+        generated_by_us = True
 
     post_text = render_post_text(POST_TEXT, username)
     if post_text:
@@ -348,6 +350,10 @@ def main():
         if started_by_us and proc is not None:
             proc.terminate()
             print("[信息] 已关闭本脚本启动的 Chrome")
+        # 自己生成的九宫格图片用完即删（手动传入的不删）
+        if generated_by_us and image_path and os.path.exists(image_path):
+            os.remove(image_path)
+            print(f"[信息] 已删除生成的图片: {image_path}")
 
 
 if __name__ == "__main__":
