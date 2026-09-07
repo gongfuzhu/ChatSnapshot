@@ -58,7 +58,11 @@ def test_fetch_recommended_uses_headers_and_proxy(monkeypatch):
 
 def test_config_constants_exist():
     assert rs.RECORD_SECONDS == 15
-    assert rs.POST_TEXT == "直播间：{username}"
+    # 文案与图片版一致（三语 + 直播链接），{username} 占位符保留
+    assert rs.POST_TEXT == (
+        "正在直播\n Live streaming now. \n ただいま配信中です。 \n"
+        "https://zh.streams.modelapp.org/{username}"
+    )
     assert isinstance(rs.API_URL, str)
     assert "go.whitetrafsa.com/api/models" in rs.API_URL
 
@@ -89,13 +93,13 @@ def test_build_ffmpeg_args_contains_required_flags():
     assert "-c:v" in args and "libx264" in args
     assert "-c:a" in args and "aac" in args
     assert "+faststart" in joined
-    assert "-proxy" in args and "http://127.0.0.1:7890" in args
+    assert "-http_proxy" in args and "http://127.0.0.1:7890" in args
     assert args[-1] == "out.mp4"
 
 
 def test_build_ffmpeg_args_no_proxy():
     args = rs.build_ffmpeg_args("https://x/master.m3u8", "out.mp4", 15, proxy="")
-    assert "-proxy" not in args
+    assert "-http_proxy" not in args
 
 
 def test_record_stream_missing_ffmpeg(monkeypatch):
@@ -128,7 +132,11 @@ def test_generate_video_no_stream_url_exits(monkeypatch):
 
 
 def test_post_text_render():
-    assert rs.render_post_text(rs.POST_TEXT, "enya-") == "直播间：enya-"
+    expected = (
+        "正在直播\n Live streaming now. \n ただいま配信中です。 \n"
+        "https://zh.streams.modelapp.org/enya-"
+    )
+    assert rs.render_post_text(rs.POST_TEXT, "enya-") == expected
 
 
 def test_main_cleans_up_when_record_fails(monkeypatch, tmp_path):
