@@ -46,8 +46,11 @@ RECORD_SECONDS = 15
 # HTTP 代理（设为空字符串则不使用代理）
 PROXY = "http://127.0.0.1:7890"
 PROXIES = {"http": PROXY, "https": PROXY} if PROXY else None
-# 发帖文案。{username} 会被替换为被录制主播的用户名。
-POST_TEXT = "直播间：{username}"
+# 发帖文案。可用 {username} 占位符，会被替换为被录制主播的用户名。
+POST_TEXT = (
+    "正在直播\n Live streaming now. \n ただいま配信中です。 \n"
+    "https://zh.streams.modelapp.org/{username}"
+)
 # ========== 配置结束 ==========
 
 
