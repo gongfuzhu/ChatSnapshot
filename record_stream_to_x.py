@@ -35,6 +35,8 @@ API_URL = (
 )
 HEADERS = {
     "accept": "*/*",
+    # 地区标识：返回中国区内容
+    "accept-language": "zh-CN,zh;q=0.9",
     "origin": "https://creative.whitetrafsa.com",
     "referer": "https://creative.whitetrafsa.com/",
     "user-agent": (
