@@ -118,27 +118,57 @@ def record_stream(stream_url, out_path, seconds=RECORD_SECONDS):
         raise RuntimeError(f"录制结果异常（文件过小或不存在）: {out_path}")
 
 
-def generate_video(out_path=None):
-    """选流并录制，返回 (视频路径, username, stream_url)。数据不足时报错退出。"""
+def _candidate_streamers(models):
+    """返回按观看人数倒序排列的可录直播间（有 480p 流且 status=public）。"""
+    public = [m for m in models if m.get("status") == "public"]
+    pool = public if public else models
+    pool = [m for m in pool if extract_stream_url(m) and m.get("username")]
+    pool.sort(key=lambda m: m.get("viewersCount", 0), reverse=True)
+    return pool
+
+
+def generate_video(out_path=None, max_attempts=3):
+    """选流并录制，失败自动换下一个直播间重试。返回 (视频路径, username, stream_url)。
+
+    HLS 流地址可能过期或主播临时断流（返回 404），因此最多尝试 max_attempts 个直播间。
+    """
     data = fetch_recommended()
-    model = pick_top_streamer(data.get("models", []))
-    if model is None:
+    candidates = _candidate_streamers(data.get("models", []))
+    if not candidates:
         print("[错误] 推荐接口没有可用直播间，退出。", file=sys.stderr)
         sys.exit(1)
-    stream_url = extract_stream_url(model)
-    if not stream_url:
-        print("[错误] 直播间没有可用的 480p 流地址，退出。", file=sys.stderr)
-        sys.exit(1)
-    username = model.get("username", "")
-    if not username:
-        print("[错误] 直播间没有 username，退出。", file=sys.stderr)
-        sys.exit(1)
+
     if out_path is None:
         out_path = datetime.now().strftime("stream_%Y%m%d_%H%M%S.mp4")
-    print(f"[信息] 选定直播间: {username}（观看 {model.get('viewersCount', 0)}）")
-    record_stream(stream_url, out_path, RECORD_SECONDS)
-    print(f"[完成] 已录制视频: {out_path}")
-    return out_path, username, stream_url
+
+    last_err = None
+    for idx, model in enumerate(candidates[:max_attempts]):
+        username = model["username"]
+        stream_url = extract_stream_url(model)
+        print(f"[信息] 尝试 {idx + 1}/{min(len(candidates), max_attempts)}: "
+              f"{username}（观看 {model.get('viewersCount', 0)}）")
+        # 每次尝试用独立的临时文件，避免上次的残留
+        attempt_path = out_path if idx == 0 else out_path.replace(".mp4", f"_{idx}.mp4")
+        try:
+            record_stream(stream_url, attempt_path, RECORD_SECONDS)
+        except Exception as e:
+            last_err = e
+            print(f"[警告] 录制失败: {str(e)[:200]}", file=sys.stderr)
+            if os.path.exists(attempt_path):
+                os.remove(attempt_path)
+            continue
+
+        # 成功：如果不是第一次，把文件重命名回目标名
+        if attempt_path != out_path:
+            if os.path.exists(out_path):
+                os.remove(out_path)
+            os.rename(attempt_path, out_path)
+        print(f"[完成] 已录制视频: {out_path}")
+        return out_path, username, stream_url
+
+    print(f"[错误] 连续 {max_attempts} 个直播间录制均失败，退出。最后错误: {last_err}",
+          file=sys.stderr)
+    sys.exit(1)
 
 
 def main():
