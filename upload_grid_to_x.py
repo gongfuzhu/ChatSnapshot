@@ -233,6 +233,10 @@ def _dismiss_x_popups(page):
             pass
 
 
+class XLoginExpiredError(RuntimeError):
+    """X 登录态失效（跳转到登录页），需要人工重新登录。"""
+
+
 def upload_media_to_x(page, media_path, post_text=""):
     """在给定页面上传媒体（图片或视频）并发布。post_text 为最终文案（已完成占位符替换）。"""
     # 先去首页，确保登录态正常、页面完全加载，避免直接跳发帖页时状态异常
@@ -244,13 +248,27 @@ def upload_media_to_x(page, media_path, post_text=""):
     print("已打开发帖页面")
     page.wait_for_timeout(2000)
 
+    # 登录态检测：未登录会被重定向到 onboarding/login 页面
+    current_url = page.url
+    if "login" in current_url or "onboarding" in current_url:
+        raise XLoginExpiredError(
+            f"X 登录态已失效，页面跳转到登录页: {current_url}。请通过向日葵重新登录 X。"
+        )
+
     # 先关掉可能挡住页面的弹窗
     _dismiss_x_popups(page)
 
-    # 先聚焦编辑区，确保页面可交互
-    editor = page.wait_for_selector(
-        '[data-testid="tweetTextarea_0"]', timeout=10000
-    )
+    # 先聚焦编辑区，确保页面可交互；若短时间内仍找不到输入框，再用 URL 二次确认是否登录失效
+    try:
+        editor = page.wait_for_selector(
+            '[data-testid="tweetTextarea_0"]', timeout=10000
+        )
+    except Exception:
+        if "login" in page.url or "onboarding" in page.url:
+            raise XLoginExpiredError(
+                f"X 登录态已失效（找不到发帖框，URL={page.url}）。请通过向日葵重新登录 X。"
+            )
+        raise
     editor.click()
     if post_text:
         editor.type(post_text)
