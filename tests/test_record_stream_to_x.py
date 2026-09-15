@@ -58,13 +58,64 @@ def test_fetch_recommended_uses_headers_and_proxy(monkeypatch):
 
 def test_config_constants_exist():
     assert rs.RECORD_SECONDS == 15
-    # 文案与图片版一致（三语 + 直播链接），{username} 占位符保留
-    assert rs.POST_TEXT == (
-        "正在直播\n Live streaming now. \n ただいま配信中です。 \n"
-        "https://zh.streams.modelapp.org/{username}"
-    )
     assert isinstance(rs.API_URL, str)
     assert "go.whitetrafsa.com/api/models" in rs.API_URL
+    # cam 详情接口，{model_id} 运行时替换
+    assert "{model_id}" in rs.CAM_API_URL
+    assert "api/front/v2/models" in rs.CAM_API_URL
+
+
+def test_clean_topic_collapses_whitespace_and_truncates():
+    assert rs.clean_topic("  日常\n客厅\t直播 ") == "日常 客厅 直播"
+    assert rs.clean_topic("") == ""
+    assert rs.clean_topic(None) == ""
+    out = rs.clean_topic("字" * 40, max_len=10)
+    assert out == "字" * 10 + "…"
+    # 未超长不补省略号
+    assert rs.clean_topic("日常客厅", max_len=10) == "日常客厅"
+
+
+def test_fetch_cam_topic_parses_topic(monkeypatch):
+    captured = {}
+
+    class FakeResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"cam": {"topic": "日常客厅"}}
+
+    def fake_get(url, headers=None, proxies=None, timeout=None):
+        captured.update(url=url, headers=headers, proxies=proxies)
+        return FakeResp()
+
+    monkeypatch.setattr(rs.requests, "get", fake_get)
+    assert rs.fetch_cam_topic(132789258, "Iridessa-") == "日常客厅"
+    assert captured["url"].endswith("/models/132789258/cam")
+    assert captured["headers"] == rs.build_cam_headers("Iridessa-")
+    assert captured["proxies"] == rs.PROXIES
+
+
+def test_fetch_cam_topic_failure_returns_empty(monkeypatch):
+    """cam 接口任何异常都降级为空主题，不影响发帖主流程。"""
+
+    def fake_get(*a, **k):
+        raise rs.requests.RequestException("boom")
+
+    monkeypatch.setattr(rs.requests, "get", fake_get)
+    assert rs.fetch_cam_topic(1) == ""
+
+
+def test_fetch_cam_topic_missing_field_returns_empty(monkeypatch):
+    class FakeResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"cam": {}}
+
+    monkeypatch.setattr(rs.requests, "get", lambda *a, **k: FakeResp())
+    assert rs.fetch_cam_topic(1) == ""
 
 
 def test_extract_stream_url_480p():
@@ -112,9 +163,11 @@ def test_generate_video_picks_records_and_returns(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(rs, "fetch_recommended", lambda: SAMPLE)
     monkeypatch.setattr(rs, "record_stream", lambda url, path, seconds: None)
-    path, username, stream_url = rs.generate_video()
+    monkeypatch.setattr(rs, "fetch_cam_topic", lambda model_id, username="": "主题")
+    path, username, stream_url, topic = rs.generate_video()
     assert username == "cara-"
     assert stream_url == SAMPLE["models"][2]["stream"]["urls"]["480p"]
+    assert topic == "主题"
     assert path.endswith(".mp4")
 
 
@@ -131,12 +184,19 @@ def test_generate_video_no_stream_url_exits(monkeypatch):
         rs.generate_video()
 
 
-def test_post_text_render():
-    expected = (
-        "正在直播\n Live streaming now. \n ただいま配信中です。 \n"
-        "https://zh.streams.modelapp.org/enya-"
-    )
-    assert rs.render_post_text(rs.POST_TEXT, "enya-") == expected
+def test_build_post_text_includes_topic(monkeypatch):
+    """有 topic 时文案包含清洗后的主题，无占位符残留、链接仍指向主播页。"""
+    import upload_grid_to_x as ux
+    monkeypatch.setattr(ux, "_template_bags", {})
+    import random
+    rng = random.Random(42)
+    # topic 模板占模板池 1/3，连取 12 次必然覆盖到
+    texts = [ux.build_post_text("enya-", topic="日常客厅", rng=rng) for _ in range(12)]
+    assert any("日常客厅" in t for t in texts)
+    for t in texts:
+        assert "{" not in t
+    # username 只出现在链接里，模板池多数带链接
+    assert any("https://zh.streams.modelapp.org/enya-" in t for t in texts)
 
 
 def test_main_cleans_up_when_record_fails(monkeypatch, tmp_path):

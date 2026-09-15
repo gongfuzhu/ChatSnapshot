@@ -112,3 +112,27 @@ def test_render_post_text_empty_username():
 def test_upload_media_to_x_exists_and_old_name_gone():
     assert hasattr(ux, "upload_media_to_x")
     assert not hasattr(ux, "upload_image_to_x")
+
+
+def test_build_post_text_without_topic_has_no_placeholder_leftover(monkeypatch):
+    """不传 topic 时只用普通模板，文案里不残留 {topic}，也不出现主题引导词。"""
+    import random
+    monkeypatch.setattr(ux, "_template_bags", {})
+    rng = random.Random(1)
+    texts = [ux.build_post_text("Alice", rng=rng) for _ in range(16)]
+    for t in texts:
+        assert "{" not in t
+        assert "直播主题" not in t and "今晚主题" not in t
+    # username 只出现在链接里；普通模板池里 5/8 带链接
+    assert any("https://zh.streams.modelapp.org/Alice" in t for t in texts)
+
+
+def test_build_post_text_with_topic_rotates_topic_templates(monkeypatch):
+    """有 topic 时主题模板参与轮换，至少一条带主题，所有文案无占位符残留。"""
+    import random
+    monkeypatch.setattr(ux, "_template_bags", {})
+    rng = random.Random(7)
+    texts = [ux.build_post_text("Alice", topic="日常客厅", rng=rng) for _ in range(24)]
+    assert any("日常客厅" in t for t in texts)
+    for t in texts:
+        assert "{" not in t

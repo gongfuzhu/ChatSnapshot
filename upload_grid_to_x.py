@@ -215,31 +215,48 @@ POST_TEMPLATES = [
     "直播片段 📹 {tags}\n正在直播 · Live",
 ]
 
+# 带直播间主题（cam.topic）的模板，仅在成功取到 topic 时加入轮换，
+# 同样保持约 2/3 带链接的比例。topic 需由调用方提前清洗（去换行、截断）。
+POST_TOPIC_TEMPLATES = [
+    "🔴 正在直播：{topic} {tags}\n{url}",
+    "{topic}\n正在直播中 {tags}\n{url}",
+    "今晚主题｜{topic}\n正在直播 · Live streaming · ただいま配信中\n{url}",
+    "直播主题：{topic} {tags}\nLive now 🔴",
+]
+
 # 话题标签池：每次从里面挑 1 个，避免每条标签完全一致
 POST_TAGS = ["#直播", "#live", "#直播中", "#livestream", "#配信"]
 
-# 模块级模板轮换队列：把模板池打乱后依次取用，用完重新打乱，
+# 模块级模板轮换队列（按是否有 topic 分池）：把模板池打乱后依次取用，用完重新打乱，
 # 避免短时间内随机抽中同一模板（尤其是某条短模板刷屏）。
-_template_bag = []
+_template_bags = {}
 
 
-def build_post_text(username, rng=None):
+def build_post_text(username, topic="", rng=None):
     """生成一条发帖文案：模板池内轮换 + 随机标签，链接比例由模板本身决定（约 2/3 带链接）。
 
     Args:
         username: 主播用户名，用于链接与占位符替换。
+        topic: 直播间主题（cam.topic），非空时主题模板参与轮换；应为已清洗的短文本。
         rng: 可选的 random.Random 实例（测试时可传入固定种子）。
     """
     import random as _random
     r = rng or _random
-    global _template_bag
-    if not _template_bag:
-        _template_bag = POST_TEMPLATES[:]
-        r.shuffle(_template_bag)
-    template = _template_bag.pop()
+    bag_key = "topic" if topic else "plain"
+    bag = _template_bags.setdefault(bag_key, [])
+    if not bag:
+        pool = POST_TEMPLATES + (POST_TOPIC_TEMPLATES if topic else [])
+        bag.extend(pool)
+        r.shuffle(bag)
+    template = bag.pop()
     tag = r.choice(POST_TAGS)
     url = LIVE_URL.replace("{username}", username)
-    return template.replace("{username}", username).replace("{url}", url).replace("{tags}", tag)
+    return (
+        template.replace("{username}", username)
+        .replace("{url}", url)
+        .replace("{tags}", tag)
+        .replace("{topic}", topic)
+    )
 
 
 

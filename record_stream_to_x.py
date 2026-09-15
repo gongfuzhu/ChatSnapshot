@@ -1,9 +1,11 @@
 """推荐直播间录制 15 秒视频并发布到 X（浏览器自动化方案）。
 
 流程：推荐直播间接口 → 选观看人数最多的 public 直播间
-      → ffmpeg 录制 480p 流 15 秒 → 复用 upload_grid_to_x 浏览器编排发帖。
+      → ffmpeg 录制 480p 流 15 秒 → cam 详情接口取直播间主题
+      → 复用 upload_grid_to_x 浏览器编排发帖。
 """
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -45,11 +47,17 @@ HEADERS = {
     ),
 }
 RECORD_SECONDS = 15
+# 直播间详情接口：录制成功后取 cam.topic 作为发帖文案的主题
+CAM_API_URL = (
+    "https://zh.streams.modelapp.org/api/front/v2/models/{model_id}/cam"
+)
+# topic 可能是很长的促销文案，发帖前截断到该长度（超出加省略号）
+TOPIC_MAX_LEN = 30
 # HTTP 代理（设为空字符串则不使用代理）
 PROXY = "http://127.0.0.1:7890"
 PROXIES = {"http": PROXY, "https": PROXY} if PROXY else None
-# 发帖文案改为从 upload_grid_to_x 的模板池随机生成（build_post_text），
-# 多模板轮换 + 链接/标签/语言变化，降低风控风险。
+# 发帖文案由 upload_grid_to_x 的模板池随机生成（build_post_text），
+# 多模板轮换 + 链接/标签/语言变化，并尽量带上直播间主题 cam.topic。
 # ========== 配置结束 ==========
 
 
@@ -64,6 +72,50 @@ def fetch_recommended():
     except requests.RequestException as e:
         print(f"[错误] 请求推荐接口失败: {e}", file=sys.stderr)
         sys.exit(1)
+
+
+def build_cam_headers(username=""):
+    """构造 cam 详情接口请求头。referer 带主播名，更接近浏览器真实请求。"""
+    headers = {
+        "accept": "*/*",
+        "accept-language": "zh-CN,zh;q=0.9",
+        "content-type": "application/json",
+        "front-version": "12.0.94",
+        "user-agent": HEADERS["user-agent"],
+    }
+    if username:
+        headers["referer"] = f"https://zh.streams.modelapp.org/{username}"
+    return headers
+
+
+def clean_topic(raw, max_len=TOPIC_MAX_LEN):
+    """清洗 cam.topic：空值返回空串，折叠所有空白为单个空格，超长截断并加省略号。"""
+    if not raw:
+        return ""
+    text = re.sub(r"\s+", " ", str(raw)).strip()
+    if len(text) > max_len:
+        text = text[:max_len].rstrip() + "…"
+    return text
+
+
+def fetch_cam_topic(model_id, username=""):
+    """请求 cam 详情接口取 cam.topic（已清洗）。任何失败都降级为空串，不阻断发帖。"""
+    try:
+        resp = requests.get(
+            CAM_API_URL.format(model_id=model_id),
+            headers=build_cam_headers(username),
+            proxies=PROXIES,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        topic = clean_topic(resp.json().get("cam", {}).get("topic", ""))
+        if topic:
+            print(f"[信息] 直播间主题: {topic}")
+        return topic
+    except (requests.RequestException, ValueError) as e:
+        print(f"[警告] 获取直播间主题失败，文案将不带主题: {str(e)[:150]}",
+              file=sys.stderr)
+        return ""
 
 
 def pick_top_streamer(models):
@@ -125,9 +177,10 @@ def _candidate_streamers(models):
 
 
 def generate_video(out_path=None, max_attempts=3):
-    """选流并录制，失败自动换下一个直播间重试。返回 (视频路径, username, stream_url)。
+    """选流并录制，失败自动换下一个直播间重试。返回 (视频路径, username, stream_url, topic)。
 
     HLS 流地址可能过期或主播临时断流（返回 404），因此最多尝试 max_attempts 个直播间。
+    topic 为该直播间的 cam.topic，取不到时为空串。
     """
     data = fetch_recommended()
     candidates = _candidate_streamers(data.get("models", []))
@@ -161,7 +214,8 @@ def generate_video(out_path=None, max_attempts=3):
                 os.remove(out_path)
             os.rename(attempt_path, out_path)
         print(f"[完成] 已录制视频: {out_path}")
-        return out_path, username, stream_url
+        topic = fetch_cam_topic(model.get("id"), username)
+        return out_path, username, stream_url, topic
 
     print(f"[错误] 连续 {max_attempts} 个直播间录制均失败，退出。最后错误: {last_err}",
           file=sys.stderr)
@@ -173,8 +227,8 @@ def main():
     proc = None
     started_by_us = False
     try:
-        _, username, _ = generate_video(out_path=video_path)
-        post_text = build_post_text(username)
+        _, username, _, topic = generate_video(out_path=video_path)
+        post_text = build_post_text(username, topic=topic)
         print(f"[信息] 发帖文案: {post_text}")
 
         proc, started_by_us = ensure_browser(port=DEBUG_PORT)
