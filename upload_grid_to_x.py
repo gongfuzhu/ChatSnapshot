@@ -237,15 +237,17 @@ def build_post_text(username, topic="", rng=None):
 
     Args:
         username: 主播用户名，用于链接与占位符替换。
-        topic: 直播间主题（cam.topic），非空时主题模板参与轮换；应为已清洗的短文本。
+        topic: 直播间主题（cam.topic）。非空时只从主题模板池抽取，保证文案一定带主题；
+            为空时才使用普通模板。topic 应为已清洗的短文本。
         rng: 可选的 random.Random 实例（测试时可传入固定种子）。
     """
     import random as _random
     r = rng or _random
+    # 有 topic 时只用主题模板，确保主题一定出现在文案里；无 topic 用普通模板
     bag_key = "topic" if topic else "plain"
+    pool = POST_TOPIC_TEMPLATES if topic else POST_TEMPLATES
     bag = _template_bags.setdefault(bag_key, [])
     if not bag:
-        pool = POST_TEMPLATES + (POST_TOPIC_TEMPLATES if topic else [])
         bag.extend(pool)
         r.shuffle(bag)
     template = bag.pop()
