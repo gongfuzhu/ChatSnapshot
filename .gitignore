@@ -9,5 +9,8 @@ venv/
 # 生成的九宫格图片
 grid_*.jpg
 
+# 生成的录制视频
+stream_*.mp4
+
 # X API 凭证（敏感，不要提交）
 x_config.py
