@@ -27,6 +27,14 @@ fi
 
 # ===== 运行 =====
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 开始执行..."
+# 随机延迟 0-15 分钟，避免发布时间过于机械（手动测试设 SKIP_DELAY=1 跳过）
+if [ -z "${SKIP_DELAY:-}" ]; then
+  DELAY=$((RANDOM % 900))
+  if [ "$DELAY" -gt 0 ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 随机延迟 ${DELAY} 秒后发布..."
+    sleep "$DELAY"
+  fi
+fi
 python upload_grid_to_x.py 2>&1
 EXIT_CODE=$?
 
