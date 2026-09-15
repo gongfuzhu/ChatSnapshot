@@ -195,6 +195,54 @@ def render_post_text(template, username):
     return template.replace("{username}", username)
 
 
+# 直播链接（{username} 替换为主播用户名）
+LIVE_URL = "https://zh.streams.modelapp.org/{username}"
+
+# 发帖文案模板池。
+# 占位符：{username} 主播名；{url} 直播间链接；{tags} 直播话题标签。
+# 设计：约 2/3 模板带链接、1/3 纯内容不带链接；语言/标签/链接位置都有变化，
+# 每次发布随机抽一套，避免固定模板 + 固定外链被风控判定为机器人/spam。
+POST_TEMPLATES = [
+    # ---- 带链接（约 2/3）----
+    "正在直播 🔴 {tags}\n Live streaming now. \n ただいま配信中です。 \n{url}",
+    "{url}\n正在直播，来看看～",
+    "🔴 Live now / 正在直播 / 配信中 {tags}\n{url}",
+    "今晚的直播间 {tags}\n正在直播 · Live streaming · ただいま配信中\n{url}",
+    "{tags} 正在直播中！\n{url}",
+    # ---- 纯视频不带链接（约 1/3，自然曝光更高、降低外链 spam 信号）----
+    "正在直播 🔴 {tags}\nLive streaming now · ただいま配信中",
+    "配信中です {tags}\nLive now 🔴",
+    "直播片段 📹 {tags}\n正在直播 · Live",
+]
+
+# 话题标签池：每次从里面挑 1 个，避免每条标签完全一致
+POST_TAGS = ["#直播", "#live", "#直播中", "#livestream", "#配信"]
+
+# 模块级模板轮换队列：把模板池打乱后依次取用，用完重新打乱，
+# 避免短时间内随机抽中同一模板（尤其是某条短模板刷屏）。
+_template_bag = []
+
+
+def build_post_text(username, rng=None):
+    """生成一条发帖文案：模板池内轮换 + 随机标签，链接比例由模板本身决定（约 2/3 带链接）。
+
+    Args:
+        username: 主播用户名，用于链接与占位符替换。
+        rng: 可选的 random.Random 实例（测试时可传入固定种子）。
+    """
+    import random as _random
+    r = rng or _random
+    global _template_bag
+    if not _template_bag:
+        _template_bag = POST_TEMPLATES[:]
+        r.shuffle(_template_bag)
+    template = _template_bag.pop()
+    tag = r.choice(POST_TAGS)
+    url = LIVE_URL.replace("{username}", username)
+    return template.replace("{username}", username).replace("{url}", url).replace("{tags}", tag)
+
+
+
 def generate_grid():
     """实时生成一张九宫格图片，返回 (文件路径, 第一张封面的 username)。"""
     data = fetch_data()
@@ -341,7 +389,11 @@ def main():
         image_path, username = generate_grid()
         generated_by_us = True
 
-    post_text = render_post_text(POST_TEXT, username)
+    # 自动生成九宫格时用随机文案模板；手动传图且无 username 时用固定文案
+    if username:
+        post_text = build_post_text(username)
+    else:
+        post_text = POST_TEXT
     if post_text:
         print(f"[信息] 发帖文案: {post_text}")
 

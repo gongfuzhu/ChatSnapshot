@@ -14,8 +14,8 @@ from playwright.sync_api import sync_playwright
 
 from upload_grid_to_x import (
     DEBUG_PORT,
+    build_post_text,
     ensure_browser,
-    render_post_text,
     upload_media_to_x,
 )
 
@@ -48,11 +48,8 @@ RECORD_SECONDS = 15
 # HTTP 代理（设为空字符串则不使用代理）
 PROXY = "http://127.0.0.1:7890"
 PROXIES = {"http": PROXY, "https": PROXY} if PROXY else None
-# 发帖文案。可用 {username} 占位符，会被替换为被录制主播的用户名。
-POST_TEXT = (
-    "正在直播\n Live streaming now. \n ただいま配信中です。 \n"
-    "https://zh.streams.modelapp.org/{username}"
-)
+# 发帖文案改为从 upload_grid_to_x 的模板池随机生成（build_post_text），
+# 多模板轮换 + 链接/标签/语言变化，降低风控风险。
 # ========== 配置结束 ==========
 
 
@@ -177,7 +174,7 @@ def main():
     started_by_us = False
     try:
         _, username, _ = generate_video(out_path=video_path)
-        post_text = render_post_text(POST_TEXT, username)
+        post_text = build_post_text(username)
         print(f"[信息] 发帖文案: {post_text}")
 
         proc, started_by_us = ensure_browser(port=DEBUG_PORT)
