@@ -14,3 +14,6 @@ stream_*.mp4
 
 # X API 凭证（敏感，不要提交）
 x_config.py
+
+# Telegram Bot 凭证（敏感，不要提交）
+tg_config.py
