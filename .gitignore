@@ -17,3 +17,8 @@ x_config.py
 
 # Telegram Bot 凭证（敏感，不要提交）
 tg_config.py
+
+# xChina 运行产物：下载的原图、已发去重记录、失败截图
+xchina_downloads/
+xchina_posted.json
+xchina_fail_*.png

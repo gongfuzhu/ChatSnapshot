@@ -8,8 +8,10 @@
 
 配置见 tg_config.py（BOT_TOKEN / CHANNEL / PROXY），该文件不入库。
 """
+import json
 import os
 import sys
+import time
 
 import requests
 
@@ -77,3 +79,43 @@ def send_video(video_path, caption=""):
     """发送视频到频道。"""
     print(f"上传视频: {video_path} ({os.path.getsize(video_path)} 字节)")
     return _upload("sendVideo", "video", video_path, caption)
+
+
+def send_media_group(photo_paths, caption="", per_batch=10):
+    """以相册（media group）形式批量发图，每批最多 per_batch（Telegram 上限 10）张。
+
+    caption 只挂在每批第一张上；这里由调用方决定是否只给首批传文案。
+    返回所有批次的 result 列表。
+    """
+    results = []
+    batches = [photo_paths[i:i + per_batch]
+               for i in range(0, len(photo_paths), per_batch)]
+    total = len(batches)
+    for bi, batch in enumerate(batches):
+        media = []
+        files = {}
+        for ii, p in enumerate(batch):
+            ap = os.path.abspath(p)
+            if not os.path.exists(ap):
+                raise TelegramPublishError(f"媒体文件不存在: {ap}")
+            key = f"photo{ii}"
+            item = {"type": "photo", "media": f"attach://{key}"}
+            # 文案只放在第一批的第一张
+            if caption and bi == 0 and ii == 0:
+                item["caption"] = caption[:1024]
+            media.append(item)
+            files[key] = (os.path.basename(ap), open(ap, "rb"),
+                          "application/octet-stream")
+        data = {"chat_id": CHANNEL, "media": json.dumps(media)}
+        try:
+            resp = requests.post(f"{API_BASE}/sendMediaGroup", data=data,
+                                 files=files, proxies=PROXIES, timeout=300)
+        finally:
+            for _, (_, fh, _) in files.items():
+                fh.close()
+        result = _check_response(resp)
+        results.append(result)
+        print(f"[OK] 相册批次 {bi + 1}/{total} 发送成功（{len(batch)} 张）")
+        if bi < total - 1:
+            time.sleep(2)  # 避免触发 Bot API 速率
+    return results
