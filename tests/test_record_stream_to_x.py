@@ -141,8 +141,8 @@ def test_build_ffmpeg_args_contains_required_flags():
     assert "-y" in args
     assert "https://x/master.m3u8" in args
     assert "-t" in args and "15" in args
-    assert "-c:v" in args and "libx264" in args
-    assert "-c:a" in args and "aac" in args
+    # 优先 -c copy 流拷贝（源已是 H.264/AAC），避免重编码在 fMP4 分片边界产生卡顿
+    assert "-c" in args and "copy" in args
     assert "+faststart" in joined
     assert "-http_proxy" in args and "http://127.0.0.1:7890" in args
     assert args[-1] == "out.mp4"

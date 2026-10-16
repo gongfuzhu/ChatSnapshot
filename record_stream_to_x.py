@@ -134,7 +134,13 @@ def extract_stream_url(model):
 
 
 def build_ffmpeg_args(stream_url, out_path, seconds, proxy=PROXY):
-    """构造 ffmpeg 拉流录制命令。重编码为 H.264/AAC，满足 X 上传要求。"""
+    """构造 ffmpeg 拉流录制命令。
+
+    源 HLS 已是 H.264(Main, yuv420p, ~30fps) + AAC，X/Telegram 直接兼容，
+    因此用 -c copy 原样拷贝，不重编码。实测重编码(libx264)会在 fMP4 分片
+    边界产生周期性帧冻结（画面每隔约 1-2 秒顿一下、音频正常），流拷贝无此问题，
+    且更快、零质量损失。
+    """
     args = [
         "ffmpeg", "-y",
         "-headers", "Referer: https://creative.whitetrafsa.com/\r\n",
@@ -142,17 +148,57 @@ def build_ffmpeg_args(stream_url, out_path, seconds, proxy=PROXY):
     if proxy:
         args += ["-http_proxy", proxy]
     args += [
+        # 网络健壮性：分片拉取失败时重连
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_on_network_error", "1",
+        "-reconnect_delay_max", "3",
         "-i", stream_url,
         "-t", str(seconds),
-        "-c:v", "libx264", "-c:a", "aac",
+        "-c", "copy",
         "-movflags", "+faststart",
         out_path,
     ]
     return args
 
 
+def _probe_video_codec(path):
+    """返回视频流编码名（如 h264/hevc）；探测失败返回空串。"""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name", "-of",
+             "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=20,
+        )
+        return r.stdout.strip().lower()
+    except Exception:
+        return ""
+
+
+def _transcode_h264(stream_url, out_path, seconds):
+    """回退方案：源流非 H.264 时重编码为 H.264/AAC（保证 X 兼容）。"""
+    args = [
+        "ffmpeg", "-y",
+        "-headers", "Referer: https://creative.whitetrafsa.com/\r\n",
+        "-http_proxy", PROXY,
+        "-reconnect", "1", "-reconnect_streamed", "1",
+        "-reconnect_on_network_error", "1", "-reconnect_delay_max", "3",
+        "-i", stream_url,
+        "-t", str(seconds),
+        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-ar", "48000",
+        "-movflags", "+faststart",
+        out_path,
+    ]
+    r = subprocess.run(args, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"ffmpeg 重编码失败: {r.stderr[-500:]}")
+
+
 def record_stream(stream_url, out_path, seconds=RECORD_SECONDS):
-    """调用 ffmpeg 录制 HLS 流为 mp4。ffmpeg 缺失抛 FileNotFoundError，录制失败抛 RuntimeError。"""
+    """拉流录为 mp4。优先 -c copy（无周期性卡顿、零质量损失）；
+    若源非 H.264（X 不兼容）则自动回退重编码。"""
     if not shutil.which("ffmpeg"):
         raise FileNotFoundError(
             "未找到 ffmpeg，请先安装（如 winget install ffmpeg 或 apt install ffmpeg）"
@@ -165,6 +211,12 @@ def record_stream(stream_url, out_path, seconds=RECORD_SECONDS):
         raise RuntimeError(f"ffmpeg 录制失败: {result.stderr[-500:]}")
     if not os.path.exists(out_path) or os.path.getsize(out_path) < 10 * 1024:
         raise RuntimeError(f"录制结果异常（文件过小或不存在）: {out_path}")
+
+    # 流拷贝后校验编码：非 H.264 则回退重编码
+    codec = _probe_video_codec(out_path)
+    if codec and codec != "h264":
+        print(f"[信息] 源流编码为 {codec}，回退重编码为 H.264 ...")
+        _transcode_h264(stream_url, out_path, seconds)
 
 
 def _candidate_streamers(models):
