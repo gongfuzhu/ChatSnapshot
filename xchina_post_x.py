@@ -215,13 +215,58 @@ def post_to_x_browser(ctx, image_paths, text):
                 raise XLoginExpiredError(f"X 登录态失效（找不到发帖框，URL={page.url}）")
             raise
         # X 的 layers 遮罩会拦截真实 click（pointer events intercepted），
-        # 用 JS 聚焦后走键盘输入，规避遮罩。
-        page.evaluate("""() => {
-            const el = document.querySelector('[data-testid="tweetTextarea_0"]');
-            if (el) el.focus();
-        }""")
+        # 先关浮层，再把无文字全屏遮挡层置为 pointer-events:none，最后聚焦+点击编辑框。
+        def _unblock_editor():
+            page.evaluate(
+                """() => {
+                    const layers = document.querySelector('#layers');
+                    if (layers) {
+                        layers.querySelectorAll('div').forEach(d => {
+                            const r = d.getBoundingClientRect();
+                            if (r.width >= innerWidth * 0.9 && r.height >= innerHeight * 0.9
+                                && (d.innerText || '').trim().length < 40) {
+                                d.style.pointerEvents = 'none';
+                            }
+                        });
+                    }
+                    const el = document.querySelector('[data-testid="tweetTextarea_0"]');
+                    if (el) { el.focus(); el.click(); }
+                }"""
+            )
+
+        try:
+            editor.click(timeout=8000)
+        except Exception:
+            print("[信息] 编辑区点击被遮挡，关闭浮层后聚焦 ...")
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+            page.wait_for_timeout(500)
+            _unblock_editor()
         if text:
+            # 聚焦后再输入；若编辑器仍为空（键盘事件被遮罩吞掉），用 JS 兜底填入
             page.keyboard.type(text, delay=15)
+            page.wait_for_timeout(300)
+            filled = page.evaluate(
+                """() => {
+                    const el = document.querySelector('[data-testid="tweetTextarea_0"]');
+                    return el ? (el.innerText || '').trim().length : 0;
+                }"""
+            )
+            if not filled:
+                print("[信息] 键盘输入未生效，用 JS 填入文案 ...")
+                _unblock_editor()
+                page.evaluate(
+                    """(t) => {
+                        const el = document.querySelector('[data-testid="tweetTextarea_0"]');
+                        if (!el) return;
+                        el.focus();
+                        // 模拟真实输入：写入文本并派发 input 事件让 React 识别
+                        document.execCommand('insertText', false, t);
+                    }""",
+                    text,
+                )
 
         page.wait_for_selector('input[type="file"]', timeout=10000)
         file_input = page.locator('input[type="file"]').first
