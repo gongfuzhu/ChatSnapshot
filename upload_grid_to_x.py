@@ -336,7 +336,40 @@ def upload_media_to_x(page, media_path, post_text=""):
                 f"X 登录态已失效（找不到发帖框，URL={page.url}）。请通过向日葵重新登录 X。"
             )
         raise
-    editor.click()
+    # 发帖页打开瞬间可能有 #layers 遮罩（瞬时引导浮层）拦截指针事件。
+    # 先尝试正常点击；被遮挡时按 Escape、隐藏遮挡层后用 JS 聚焦兜底。
+    try:
+        editor.click(timeout=8000)
+    except Exception:
+        print("[信息] 编辑区点击被遮挡，尝试关闭浮层后聚焦 ...")
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        page.wait_for_timeout(500)
+        # 隐藏 #layers 中不可见内容对应的全屏遮挡层（不删数据，仅设 pointer-events:none）
+        page.evaluate(
+            """() => {
+                const layers = document.querySelector('#layers');
+                if (!layers) return;
+                // 找到覆盖整屏且内部无可见输入内容的遮挡 div
+                layers.querySelectorAll('div').forEach(d => {
+                    const r = d.getBoundingClientRect();
+                    if (r.width >= window.innerWidth * 0.9 && r.height >= window.innerHeight * 0.9) {
+                        const txt = (d.innerText || '').trim();
+                        if (txt.length < 40) d.style.pointerEvents = 'none';
+                    }
+                });
+            }"""
+        )
+        # JS 直接聚焦编辑区并点击，绕过指针命中检测
+        page.evaluate(
+            """() => {
+                const ed = document.querySelector('[data-testid=\"tweetTextarea_0\"]');
+                if (ed) { ed.focus(); ed.click(); }
+            }"""
+        )
+        page.wait_for_timeout(500)
     if post_text:
         editor.type(post_text)
 
