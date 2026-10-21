@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=发布视频浏览器(X)
+Name[zh_CN]=发布视频浏览器(X)
+Comment=启动带日本代理和9222调试端口的 Chrome（X 登录/发帖专用 profile）
+Comment[zh_CN]=启动带日本代理和9222调试端口的 Chrome（X 登录/发帖专用 profile）
+Exec=/home/gfz/ChatSnapshot/launch-x-browser.sh
+Icon=google-chrome
+Terminal=false
+Categories=Network;
+StartupNotify=true
