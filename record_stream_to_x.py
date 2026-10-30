@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime
 
 import requests
@@ -47,6 +48,10 @@ HEADERS = {
     ),
 }
 RECORD_SECONDS = 15
+# 视频归档：录制成功后保存一份到 video_archive/，最多保留最新 ARCHIVE_KEEP 个
+HERE = os.path.dirname(os.path.abspath(__file__))
+ARCHIVE_DIR = os.path.join(HERE, "video_archive")
+ARCHIVE_KEEP = 20
 # 直播间详情接口：录制成功后取 cam.topic 作为发帖文案的主题
 CAM_API_URL = (
     "https://zh.streams.modelapp.org/api/front/v2/models/{model_id}/cam"
@@ -61,17 +66,24 @@ PROXIES = {"http": PROXY, "https": PROXY} if PROXY else None
 # ========== 配置结束 ==========
 
 
-def fetch_recommended():
-    """请求推荐直播间接口，返回 JSON。失败时报错退出。"""
-    try:
-        resp = requests.get(
-            API_URL, headers=HEADERS, proxies=PROXIES, timeout=15
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except requests.RequestException as e:
-        print(f"[错误] 请求推荐接口失败: {e}", file=sys.stderr)
-        sys.exit(1)
+def fetch_recommended(retries=3):
+    """请求推荐直播间接口，返回 JSON。SSL/网络抖动时重试，最终失败才退出。"""
+    last_e = None
+    for i in range(retries):
+        try:
+            resp = requests.get(
+                API_URL, headers=HEADERS, proxies=PROXIES, timeout=15
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except requests.RequestException as e:
+            last_e = e
+            if i < retries - 1:
+                print(f"[警告] 推荐接口请求失败（{str(e)[:80]}），{3 * (i + 1)}s 后重试 "
+                      f"{i + 2}/{retries} ...", file=sys.stderr)
+                time.sleep(3 * (i + 1))
+    print(f"[错误] 请求推荐接口失败（已重试 {retries} 次）: {last_e}", file=sys.stderr)
+    sys.exit(1)
 
 
 def build_cam_headers(username=""):
@@ -153,6 +165,8 @@ def build_ffmpeg_args(stream_url, out_path, seconds, proxy=PROXY):
         "-reconnect_streamed", "1",
         "-reconnect_on_network_error", "1",
         "-reconnect_delay_max", "3",
+        # 读写超时（微秒）：避免坏流在连接/分片阶段无限挂起（-timeout 对 HLS 非法，勿用）
+        "-rw_timeout", "15000000",
         "-i", stream_url,
         "-t", str(seconds),
         "-c", "copy",
@@ -184,6 +198,8 @@ def _transcode_h264(stream_url, out_path, seconds):
         "-http_proxy", PROXY,
         "-reconnect", "1", "-reconnect_streamed", "1",
         "-reconnect_on_network_error", "1", "-reconnect_delay_max", "3",
+        # 读写超时（微秒）：避免坏流在连接/分片阶段无限挂起（-timeout 对 HLS 非法，勿用）
+        "-rw_timeout", "15000000",
         "-i", stream_url,
         "-t", str(seconds),
         "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
@@ -191,7 +207,7 @@ def _transcode_h264(stream_url, out_path, seconds):
         "-movflags", "+faststart",
         out_path,
     ]
-    r = subprocess.run(args, capture_output=True, text=True)
+    r = subprocess.run(args, capture_output=True, text=True, timeout=seconds + 60)
     if r.returncode != 0:
         raise RuntimeError(f"ffmpeg 重编码失败: {r.stderr[-500:]}")
 
@@ -203,10 +219,20 @@ def record_stream(stream_url, out_path, seconds=RECORD_SECONDS):
         raise FileNotFoundError(
             "未找到 ffmpeg，请先安装（如 winget install ffmpeg 或 apt install ffmpeg）"
         )
-    result = subprocess.run(
-        build_ffmpeg_args(stream_url, out_path, seconds),
-        capture_output=True, text=True,
-    )
+    # 总超时兜底：录制 seconds 秒 + 最多 40 秒连接/网络余量，避免坏流无限挂起
+    try:
+        result = subprocess.run(
+            build_ffmpeg_args(stream_url, out_path, seconds),
+            capture_output=True, text=True,
+            timeout=seconds + 40,
+        )
+    except subprocess.TimeoutExpired:
+        if os.path.exists(out_path):
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
+        raise RuntimeError(f"ffmpeg 录制超时（>{seconds + 40}s），流可能不可用: {stream_url[:80]}")
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg 录制失败: {result.stderr[-500:]}")
     if not os.path.exists(out_path) or os.path.getsize(out_path) < 10 * 1024:
@@ -226,6 +252,36 @@ def _candidate_streamers(models):
     pool = [m for m in pool if extract_stream_url(m) and m.get("username")]
     pool.sort(key=lambda m: m.get("viewersCount", 0), reverse=True)
     return pool
+
+
+def archive_video(src_path, username):
+    """录制成功后把视频复制一份到 video_archive/，文件名含时间戳和主播名。
+
+    保留最新 ARCHIVE_KEEP 个 mp4，超出的最旧文件删除。归档失败不影响发布主流程。
+    """
+    try:
+        os.makedirs(ARCHIVE_DIR, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_user = re.sub(r"[^A-Za-z0-9_\-]", "_", str(username or "cam"))[:40]
+        dest = os.path.join(ARCHIVE_DIR, f"stream_{ts}_{safe_user}.mp4")
+        shutil.copy2(src_path, dest)
+        # 轮转：只统计归档产物（stream_YYYYMMDD_HHMMSS_主播.mp4），
+        # 按修改时间从新到旧，仅保留最新 ARCHIVE_KEEP 个（不误删目录里的其他文件）
+        pat = re.compile(r"^stream_\d{8}_\d{6}_.+\.mp4$", re.IGNORECASE)
+        mp4s = [os.path.join(ARCHIVE_DIR, f) for f in os.listdir(ARCHIVE_DIR)
+                if pat.match(f)]
+        mp4s.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        for old in mp4s[ARCHIVE_KEEP:]:
+            try:
+                os.remove(old)
+                print(f"[归档] 超出保留数量，删除最旧: {os.path.basename(old)}")
+            except OSError:
+                pass
+        print(f"[归档] 已保存视频（保留最近 {ARCHIVE_KEEP} 条）: {os.path.basename(dest)}")
+        return dest
+    except Exception as e:
+        print(f"[归档] 保存失败（不影响发布）: {e}", file=sys.stderr)
+        return None
 
 
 def generate_video(out_path=None, max_attempts=3):
@@ -267,6 +323,7 @@ def generate_video(out_path=None, max_attempts=3):
             os.rename(attempt_path, out_path)
         print(f"[完成] 已录制视频: {out_path}")
         topic = fetch_cam_topic(model.get("id"), username)
+        archive_video(out_path, username)
         return out_path, username, stream_url, topic
 
     print(f"[错误] 连续 {max_attempts} 个直播间录制均失败，退出。最后错误: {last_err}",
