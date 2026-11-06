@@ -22,3 +22,6 @@ tg_config.py
 xchina_downloads/
 xchina_posted.json
 xchina_fail_*.png
+everia_downloads/
+everia_posted.json
+pending_videos/
