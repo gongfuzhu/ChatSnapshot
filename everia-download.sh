@@ -4,6 +4,7 @@
 #   bash everia-download.sh                 # 下载最新 1 套未下载的（webp 原图）
 #   bash everia-download.sh --limit 3       # 一次 3 套
 #   bash everia-download.sh --to-jpg        # 转 jpg
+#   bash everia-download.sh --pdf           # 下载后自动合成 PDF 到 pdf_output/
 #   bash everia-download.sh --url <文章URL>  # 指定套图
 # 去重：everia_posted.json；输出：everia_downloads/（已 Samba 共享 [everia]）
 set -uo pipefail

@@ -37,6 +37,8 @@ if sys.stderr.encoding != "utf-8":
 BASE = "https://everia.club"
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_ROOT = os.path.join(HERE, "everia_downloads")
+# --pdf 生成的 PDF 统一放这里（已在 .gitignore）
+PDF_DIR = os.path.join(HERE, "pdf_output")
 POSTED_JSON = os.path.join(HERE, "everia_posted.json")
 PROXY = "http://127.0.0.1:7890"
 PROXIES = {"http": PROXY, "https": PROXY}
@@ -220,7 +222,7 @@ def ext_of(url):
     return ".webp"
 
 
-def download_set(url, to_jpg=False):
+def download_set(url, to_jpg=False, make_pdf=False):
     """下载一整套。返回 (目录, 张数)。已下载抛 FileExistsError。"""
     slug = slug_from_url(url)
     posted = load_posted()
@@ -262,6 +264,11 @@ def download_set(url, to_jpg=False):
     if failed:
         log(f"[注意] {len(failed)} 张失败，成功 {len(saved)} 张")
 
+    # 可选：下载完成后立即合成 PDF
+    pdf_path = ""
+    if make_pdf:
+        pdf_path = make_pdf_for_dir(dest_dir, slug) or ""
+
     posted[slug] = {
         "url": url,
         "title": title,
@@ -269,6 +276,7 @@ def download_set(url, to_jpg=False):
         "pcount": len(imgs),
         "saved": len(saved),
         "to_jpg": bool(to_jpg),
+        "pdf": pdf_path,
         "ts": int(time.time()),
         "images": saved,
         "failed": [u for u, _ in failed],
@@ -289,12 +297,37 @@ def to_jpeg(path):
     return os.path.basename(jpg_path)
 
 
+def make_pdf_for_dir(dest_dir, slug):
+    """把已下载的图集目录合成单个 PDF（复用 images_to_pdf）。
+
+    输出 pdf_output/<slug>.pdf；失败只告警不影响下载主流程，返回 PDF 路径或 None。
+    """
+    try:
+        from images_to_pdf import collect_images, build_pdf
+        imgs = collect_images([dest_dir])
+        if not imgs:
+            log("[PDF] 目录里没有可转换的图片，跳过")
+            return None
+        os.makedirs(PDF_DIR, exist_ok=True)
+        out_pdf = os.path.join(PDF_DIR, slug + ".pdf")
+        ok, failed = build_pdf(imgs, out_pdf)
+        size_kb = os.path.getsize(out_pdf) // 1024
+        log(f"[PDF] 已生成 {out_pdf}（{ok} 页，{size_kb} KB"
+            + (f"，{len(failed)} 张失败" if failed else "") + "）")
+        return out_pdf
+    except Exception as e:
+        log(f"[PDF] 生成失败（不影响已下载图片）: {e}")
+        return None
+
+
 def main():
     ap = argparse.ArgumentParser(description="everia.club 套图下载器")
     ap.add_argument("--url", help="直接下载指定文章页 URL")
     ap.add_argument("--pages", type=int, default=2, help="扫描列表页数（默认2）")
     ap.add_argument("--limit", type=int, default=1, help="本次下载套数（默认1）")
     ap.add_argument("--to-jpg", action="store_true", help="webp/png 转 jpg")
+    ap.add_argument("--pdf", action="store_true",
+                    help="下载完成后把该套图合成 PDF（输出到 pdf_output/）")
     args = ap.parse_args()
 
     if args.url:
@@ -315,7 +348,7 @@ def main():
             log(f"跳过已下载: {slug}")
             continue
         try:
-            download_set(url, to_jpg=args.to_jpg)
+            download_set(url, to_jpg=args.to_jpg, make_pdf=args.pdf)
             done += 1
         except FileExistsError as e:
             log(str(e))
