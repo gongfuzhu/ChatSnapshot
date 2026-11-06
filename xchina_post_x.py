@@ -225,7 +225,7 @@ def download_originals(browser_ctx, aid, indices):
 
 # ---------- 浏览器发帖（复用已登录 X 的有头 Chrome，不走官方 API） ----------
 
-def post_to_x_browser(ctx, image_paths, text):
+def post_to_x_browser(ctx, image_paths, text, attach_progress_only=False):
     page = ctx.new_page()
     # 监听发推响应：新版 X 的 GraphQL mutation 名可能不是 CreateTweet，
     # 用 graphql 路径里的操作名 + 状态一起记录，成功判定见下方。
@@ -353,24 +353,35 @@ def post_to_x_browser(ctx, image_paths, text):
         # 关键：预览缩略图是本地即时生成的，出现≠上传完成。媒体真正传到 X 服务器期间，
         # 每张图上会有 [role=progressbar] 上传进度条；没传完时点击发布会被前端静默忽略
         # （不发任何请求、CreateTweet 永远为 None）。必须等所有进度条消失。
+        # attach_progress_only=True 时只统计【图片附件区内】的进度条，忽略弹窗底部
+        # 工具栏可能长期存在的无关转圈（草稿同步等），避免被它拖累到超时。
+        if attach_progress_only:
+            bar_expr = ("const att = dlg.querySelector('[data-testid=\"attachments\"]');"
+                        "return att ? att.querySelectorAll('[role=\"progressbar\"]').length "
+                        ": dlg.querySelectorAll('[role=\"progressbar\"]').length;")
+        else:
+            bar_expr = "return dlg.querySelectorAll('[role=\"progressbar\"]').length;"
         try:
             page.wait_for_function(
                 """() => {
                     const dlg = (%s)();
                     if (!dlg) return false;
-                    const bars = dlg.querySelectorAll('[role="progressbar"]');
-                    // 同时确认图片数齐
+                    %s
                     const imgs = dlg.querySelectorAll('[data-testid="attachments"] img').length;
-                    return bars.length === 0 && imgs >= %d;
-                }""" % (VDLG, len(abs_paths)),
+                    return bars === 0 && imgs >= %d;
+                }""" % (VDLG, bar_expr.replace("return ", "const bars = ", 1), len(abs_paths)),
                 timeout=180000,
             )
             print("✅ 图片全部上传完成（进度条消失）")
         except Exception:
-            # 兜底：再固定等 8 秒，并检查是否仍有进度条
+            # 兜底：再固定等 8 秒，并检查附件区是否仍有进度条
             page.wait_for_timeout(8000)
             still = page.evaluate(
-                """() => { const dlg=(%s)(); return dlg ? dlg.querySelectorAll('[role="progressbar"]').length : -1; }""" % VDLG
+                """() => { const dlg=(%s)(); if(!dlg) return -1;
+                    const att = dlg.querySelector('[data-testid="attachments"]');
+                    const scope = %s ? (att || dlg) : dlg;
+                    return scope.querySelectorAll('[role="progressbar"]').length;
+                }""" % (VDLG, "true" if attach_progress_only else "false")
             )
             print(f"[信息] 进度条等待超时，当前剩余进度条 {still}")
 
