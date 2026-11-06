@@ -126,37 +126,25 @@ def list_latest(pages=2):
         for a in soup.find_all("a", href=True):
             href = a["href"]
             # 文章页特征：everia.club/YYYY/MM/DD/slug/
-            if re.match(r"https?://everia\.club/\d{4}/\d{2}/\d{2}/[^/]+/?$", href):
-                href = href.rstrip("/") + "/"
-                if href not in seen:
-                    seen.add(href)
-                    posts.append(href)
+            if not re.match(r"https?://everia\.club/\d{4}/\d{2}/\d{2}/[^/]+/?$", href):
+                continue
+            # 排除文章内分页：末段为纯数字（如 .../lingyu69/2/），slug 必含字母
+            last = unquote(urlparse(href).path.rstrip("/").rsplit("/", 1)[-1])
+            if last.isdigit():
+                continue
+            href = href.rstrip("/") + "/"
+            if href not in seen:
+                seen.add(href)
+                posts.append(href)
         log(f"列表页 {n} 扫描完成，累计候选 {len(posts)} 套")
     return posts
 
 
-def parse_post(url):
-    """解析文章页，返回 (title, tags, [图片URL...])，只取 entry-content 正文图。"""
-    html = http_get(url, referer=BASE)
-    soup = BeautifulSoup(html, "html.parser")
-
-    # 标题：优先 h1，退化到 <title> 去掉站点后缀
-    title = ""
-    h1 = soup.find("h1")
-    if h1 and h1.get_text(strip=True):
-        title = h1.get_text(" ", strip=True)
-    if not title and soup.title:
-        title = soup.title.get_text(strip=True)
-    title = re.sub(r"\s*[–-]\s*Everia\.club\s*$", "", title).strip()
-
-    tags = [t.get_text(strip=True) for t in
-            soup.select('a[rel~="tag"]')] or []
-
+def _extract_images(soup):
+    """从一个页面的 entry-content 中按顺序提取正文图片 URL（去重、排除非套图资源）。"""
     content = soup.select_one("div.entry-content")
     if content is None:
-        # 退化：整个 article
         content = soup.find("article") or soup
-
     imgs, seen = [], set()
     for img in content.find_all("img"):
         src = (img.get("src") or img.get("data-src")
@@ -171,6 +159,56 @@ def parse_post(url):
         if src not in seen:
             seen.add(src)
             imgs.append(src)
+    return imgs
+
+
+def _detect_page_count(soup):
+    """从 post-page-numbers 分页导航检测文章内分页数；无分页返回 1。"""
+    nums = set()
+    for a in soup.select("a.post-page-numbers"):
+        m = re.search(r"/(\d+)/?$", a.get("href", ""))
+        if m:
+            nums.add(int(m.group(1)))
+    for span in soup.select("span.post-page-numbers.current"):
+        t = span.get_text(strip=True)
+        if t.isdigit():
+            nums.add(int(t))
+    return max(nums) if nums else 1
+
+
+def parse_post(url):
+    """解析文章（含 WordPress 文章内分页 /2/ /3/ ...），汇总所有页正文图。
+
+    返回 (title, tags, [图片URL...])，图片按页码顺序拼接、全局去重。
+    """
+    base = url.rstrip("/")
+    html = http_get(base + "/", referer=BASE)
+    soup = BeautifulSoup(html, "html.parser")
+
+    title = ""
+    h1 = soup.find("h1")
+    if h1 and h1.get_text(strip=True):
+        title = h1.get_text(" ", strip=True)
+    if not title and soup.title:
+        title = soup.title.get_text(strip=True)
+    title = re.sub(r"\s*[–-]\s*Everia\.club\s*$", "", title).strip()
+
+    tags = [t.get_text(strip=True) for t in
+            soup.select('a[rel~="tag"]')] or []
+
+    page_count = _detect_page_count(soup)
+    imgs, seen = [], set()
+    for n in range(1, page_count + 1):
+        page_soup = soup if n == 1 else BeautifulSoup(
+            http_get(f"{base}/{n}/", referer=BASE), "html.parser")
+        page_imgs = _extract_images(page_soup)
+        added = 0
+        for src in page_imgs:
+            if src not in seen:
+                seen.add(src)
+                imgs.append(src)
+                added += 1
+        log(f"  第 {n}/{page_count} 页：本页 {len(page_imgs)} 张，新增 {added} 张")
     return title, tags, imgs
 
 
