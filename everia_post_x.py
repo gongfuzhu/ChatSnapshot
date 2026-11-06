@@ -36,6 +36,7 @@ from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
 DL_ROOT = HERE / "everia_downloads"
+PDF_DIR = HERE / "pdf_output"
 DL_POSTED = HERE / "everia_posted.json"        # 下载脚本的元数据
 X_POSTED = HERE / "everia_x_posted.json"       # 本脚本独立去重
 MAX_N = 4
@@ -64,6 +65,19 @@ def save_x_posted(data):
     tmp = X_POSTED.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, X_POSTED)
+
+
+def ensure_pdf(slug, album_dir, imgs):
+    """返回该图集的 PDF 路径：已存在直接复用，否则用 images_to_pdf 现场生成。"""
+    pdf_path = PDF_DIR / f"{slug}.pdf"
+    if pdf_path.exists() and pdf_path.stat().st_size > 0:
+        log(f"复用已有 PDF: {pdf_path.name}")
+        return pdf_path
+    log("未找到现成 PDF，现场生成 ...")
+    from images_to_pdf import build_pdf
+    PDF_DIR.mkdir(parents=True, exist_ok=True)
+    build_pdf([str(p) for p in imgs], str(pdf_path))
+    return pdf_path
 
 
 def build_caption(meta):
@@ -143,6 +157,8 @@ def main():
     ap.add_argument("--n", type=int, default=4, help=f"发 X 张数（最多 {MAX_N}）")
     ap.add_argument("--slug", default="", help="指定 everia_downloads 下的图集目录名")
     ap.add_argument("--dry-run", action="store_true", help="只选图转换，不发帖")
+    ap.add_argument("--tg-pdf", action="store_true",
+                    help="X 成功后把该图集 PDF 发到 Telegram 频道（无 PDF 则现场生成）")
     args = ap.parse_args()
 
     n = max(1, min(args.n, MAX_N))
@@ -189,7 +205,22 @@ def main():
         }
         save_x_posted(x_posted)
         log(f"✅ 已发 X 并记录去重: {slug}")
-        return 0
+
+        # 可选：把该图集 PDF 发到 Telegram 频道（失败不回滚 X，仅以退出码 3 告警）
+        tg_failed = False
+        if args.tg_pdf:
+            try:
+                pdf_path = ensure_pdf(slug, DL_ROOT / slug, all_imgs)
+                from telegram_poster import send_document
+                send_document(str(pdf_path), caption=caption)
+                log(f"✅ PDF 已发 Telegram: {pdf_path.name}")
+                x_posted = load_json(X_POSTED)
+                x_posted[slug]["tg_pdf"] = str(pdf_path)
+                save_x_posted(x_posted)
+            except Exception as e:
+                tg_failed = True
+                log(f"[警告] PDF 发 Telegram 失败（X 已成功）: {e}")
+        return 3 if tg_failed else 0
     finally:
         import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
