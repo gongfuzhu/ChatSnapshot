@@ -26,8 +26,10 @@ if [ -z "${SKIP_DELAY:-}" ]; then
     sleep "$DELAY"
   fi
 fi
+set +e  # 临时关闭，确保能捕获 python 退出码
 python post_video_to_telegram.py 2>&1
 EXIT_CODE=$?
+set -e  # 恢复严格模式
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 执行完毕，退出码: $EXIT_CODE"
 exit $EXIT_CODE
