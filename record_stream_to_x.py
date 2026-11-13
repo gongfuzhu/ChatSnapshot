@@ -52,6 +52,12 @@ RECORD_SECONDS = 15
 HERE = os.path.dirname(os.path.abspath(__file__))
 ARCHIVE_DIR = os.path.join(HERE, "video_archive")
 ARCHIVE_KEEP = 20
+# 单帧持续时间超过该阈值（秒）即判定为“丢分片导致的画面冻结”。
+# 正常 30fps 帧间隔约 0.033s，HLS 丢一个 2s 分片会产生约 2s 的超长帧；
+# 取 0.1s（约 3 倍正常帧长）既能抓到丢分片，又不会误报轻微抖动。
+STALL_FRAME_SEC = 0.1
+# 修复后重建的目标恒定帧率
+CFR_FPS = 30
 # 直播间详情接口：录制成功后取 cam.topic 作为发帖文案的主题
 CAM_API_URL = (
     "https://zh.streams.modelapp.org/api/front/v2/models/{model_id}/cam"
@@ -212,6 +218,104 @@ def _transcode_h264(stream_url, out_path, seconds):
         raise RuntimeError(f"ffmpeg 重编码失败: {r.stderr[-500:]}")
 
 
+def parse_stall_frames(csv_text, threshold=STALL_FRAME_SEC):
+    """解析 ffprobe frame CSV（列尾为 pkt_duration_time），返回超长帧列表。
+
+    纯函数便于单测。每个元素为 (pts_time, pkt_duration_time)，均为 float。
+    ffprobe csv 行形如 `0,3.958000,2.000000,` 或 `1,0.023000,0.034000,`。
+    """
+    stalls = []
+    for line in csv_text.splitlines():
+        parts = [p for p in line.split(",") if p.strip() != ""]
+        if len(parts) < 2:
+            continue
+        try:
+            pts = float(parts[-2])
+            dur = float(parts[-1])
+        except ValueError:
+            continue
+        if dur > threshold:
+            stalls.append((pts, dur))
+    return stalls
+
+
+def detect_stall_frames(path):
+    """检测视频是否存在丢分片导致的画面冻结。
+
+    返回 (has_stall: bool, stalls: list[(pts, duration)])。
+    ffprobe 不可用或探测失败时降级为“无冻结”，避免误伤正常发布流程。
+    """
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "frame=pts_time,pkt_duration_time",
+             "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False, []
+    if r.returncode != 0:
+        return False, []
+    stalls = parse_stall_frames(r.stdout)
+    return (len(stalls) > 0), stalls
+
+
+def repair_cfr(path, fps=CFR_FPS):
+    """用恒定帧率重编码重建时间戳，填平丢分片造成的冻结空洞，原地替换文件。
+
+    丢失的真实画面无法找回，重编码以相邻帧重复填充，使播放平滑、不再顿卡。
+    返回生成的临时文件大小（字节）。失败抛 RuntimeError，由调用方决定是否降级。
+    """
+    tmp = path + ".cfr.mp4"
+    args = [
+        "ffmpeg", "-y", "-v", "error", "-i", path,
+        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+        "-r", str(fps), "-vsync", "cfr",
+        "-c:a", "aac", "-ar", "48000",
+        "-movflags", "+faststart",
+        tmp,
+    ]
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=90)
+        if r.returncode != 0:
+            raise RuntimeError(f"CFR 重编码失败: {r.stderr[-300:]}")
+        if not os.path.exists(tmp) or os.path.getsize(tmp) < 10 * 1024:
+            raise RuntimeError("CFR 重编码结果异常（文件过小或不存在）")
+        os.replace(tmp, path)
+        return os.path.getsize(path)
+    except subprocess.TimeoutExpired:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        raise RuntimeError("CFR 重编码超时（>90s）")
+
+
+def ensure_smooth_video(path):
+    """录制后质检：检测冻结帧，发现则自动 CFR 修复。返回告警字符串（无问题为空串）。
+
+    任何异常都降级为“仅告警、不阻断发布”，避免质检环节反而拖垮主流程。
+    """
+    try:
+        has_stall, stalls = detect_stall_frames(path)
+        if not has_stall:
+            return ""
+        worst = max(stalls, key=lambda x: x[1])
+        warn = (f"检测到 {len(stalls)} 处画面冻结（最长 {worst[1]:.2f}s "
+                f"@pts {worst[0]:.2f}s，疑似录制丢分片），启动 CFR 修复 ...")
+        print(f"[质检] {warn}")
+        repair_cfr(path)
+        # 复检：确认冻结帧已消除
+        still, _ = detect_stall_frames(path)
+        if still:
+            return warn + "；修复后仍检测到冻结帧，请关注代理/CDN 稳定性"
+        print("[质检] CFR 修复完成，冻结帧已消除")
+        return warn + "；已自动 CFR 修复（重复帧填充，播放不再卡顿）"
+    except Exception as e:
+        return f"视频质检/修复异常（已跳过，不影响发布）: {str(e)[:160]}"
+
+
 def record_stream(stream_url, out_path, seconds=RECORD_SECONDS):
     """拉流录为 mp4。优先 -c copy（无周期性卡顿、零质量损失）；
     若源非 H.264（X 不兼容）则自动回退重编码。"""
@@ -243,6 +347,12 @@ def record_stream(stream_url, out_path, seconds=RECORD_SECONDS):
     if codec and codec != "h264":
         print(f"[信息] 源流编码为 {codec}，回退重编码为 H.264 ...")
         _transcode_h264(stream_url, out_path, seconds)
+
+    # 质检：检测丢分片造成的画面冻结，发现即自动 CFR 修复（不阻断发布）。
+    # 告警信息会进入 stdout，供定时任务据此汇报网络/CDN 稳定性。
+    quality_warn = ensure_smooth_video(out_path)
+    if quality_warn:
+        print(f"[质检告警] {quality_warn}", file=sys.stderr)
 
 
 def _candidate_streamers(models):

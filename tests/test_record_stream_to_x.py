@@ -229,3 +229,87 @@ def test_main_cleans_up_when_record_fails(monkeypatch, tmp_path):
         rs.main()
 
     assert not expected_path.exists(), "录制失败后临时视频应被清理"
+
+
+# ---------- 视频质检 / CFR 修复 ----------
+
+def test_parse_stall_frames_detects_long_duration():
+    # 列序 keyframe,pts_time,pkt_duration_time，含一个 2s 超长帧（模拟丢分片）
+    csv_text = (
+        "1,0.007000,0.016000,\n"
+        "0,0.023000,0.034000,\n"
+        "0,3.958000,2.000000,\n"
+        "1,5.958000,0.033000,\n"
+    )
+    stalls = rs.parse_stall_frames(csv_text)
+    assert stalls == [(3.958, 2.0)]
+
+
+def test_parse_stall_frames_healthy_video_returns_empty():
+    csv_text = "0,0.033000,0.033000,\n0,0.066000,0.033000,\n"
+    assert rs.parse_stall_frames(csv_text) == []
+
+
+def test_parse_stall_frames_tolerates_bad_lines():
+    csv_text = "garbage\n\n0,1.000000,0.034000,\n"
+    assert rs.parse_stall_frames(csv_text) == []
+
+
+def test_ensure_smooth_repairs_when_stall_detected(monkeypatch):
+    monkeypatch.setattr(rs, "detect_stall_frames",
+                        lambda p: (True, [(3.958, 2.0)]))
+    calls = {"repair": 0, "detect": 0}
+
+    def fake_detect(p):
+        calls["detect"] += 1
+        # 首次检测有冻结，修复后复检已消除
+        return (True, [(3.958, 2.0)]) if calls["detect"] == 1 else (False, [])
+
+    def fake_repair(p, fps=rs.CFR_FPS):
+        calls["repair"] += 1
+
+    monkeypatch.setattr(rs, "detect_stall_frames", fake_detect)
+    monkeypatch.setattr(rs, "repair_cfr", fake_repair)
+    warn = rs.ensure_smooth_video("x.mp4")
+    assert calls["repair"] == 1
+    assert "CFR 修复" in warn and "不再卡顿" in warn
+
+
+def test_ensure_smooth_healthy_video_noop(monkeypatch):
+    monkeypatch.setattr(rs, "detect_stall_frames", lambda p: (False, []))
+    def boom(*a, **k):
+        raise AssertionError("健康视频不应触发重编码")
+    monkeypatch.setattr(rs, "repair_cfr", boom)
+    assert rs.ensure_smooth_video("x.mp4") == ""
+
+
+def test_ensure_smooth_swallows_exceptions(monkeypatch):
+    def boom(p):
+        raise OSError("ffprobe missing")
+    monkeypatch.setattr(rs, "detect_stall_frames", boom)
+    # 不抛异常，返回告警串，主流程不被阻断
+    warn = rs.ensure_smooth_video("x.mp4")
+    assert "质检" in warn
+
+
+def test_record_stream_runs_quality_check(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(rs.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+
+    class FakeProc:
+        returncode = 0
+        stderr = ""
+
+    monkeypatch.setattr(rs.subprocess, "run", lambda *a, **k: FakeProc())
+    monkeypatch.setattr(rs, "_probe_video_codec", lambda p: "h264")
+    out = tmp_path / "v.mp4"
+    out.write_bytes(b"x" * 20000)
+
+    seen = {}
+    def fake_ensure(path):
+        seen["path"] = path
+        return ""
+    monkeypatch.setattr(rs, "ensure_smooth_video", fake_ensure)
+
+    rs.record_stream("https://x/master.m3u8", str(out))
+    assert seen["path"] == str(out)
