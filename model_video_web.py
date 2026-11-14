@@ -111,7 +111,15 @@ PAGE_HTML = """<!DOCTYPE html>
   .pub.st-rejected{background:rgba(200,50,60,.92);color:#fff;border-color:#c8323c}
   .pub .dot{width:8px;height:8px;border-radius:50%;background:currentColor}
   .card.st-approved{border-color:var(--free)}
-  .card.st-rejected{border-color:#c8323c;opacity:.82}
+  .card.st-rejected{border-color:#c8323c;opacity:.85}
+  .pubrow{display:flex;gap:6px;margin-top:9px}
+  .pubbtn{flex:1;padding:7px 0;font-size:12px;border-radius:8px;cursor:pointer;
+       border:1px solid var(--line);background:#161922;color:var(--mut);
+       transition:all .12s;font-family:inherit}
+  .pubbtn:hover{filter:brightness(1.3)}
+  .pubbtn.st-pending.active{background:#3a4150;color:#fff;border-color:#5a6373}
+  .pubbtn.st-approved.active{background:rgba(31,157,85,.95);color:#fff;border-color:var(--free)}
+  .pubbtn.st-rejected.active{background:rgba(200,50,60,.95);color:#fff;border-color:#c8323c}
   .meta{padding:10px 12px}
   .title{font-size:14px;line-height:1.4;margin:0 0 6px;
        display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:39px}
@@ -202,47 +210,56 @@ async function load(p){
     return `<div class="card st-${st}" id="card-${v.video_id}" onclick='play(${JSON.stringify(v).replace(/'/g,"&#39;")})'>
       <div class="thumb" style="background-image:url('${esc(v.cover_url)}')">
         <span class="badge ${free?"free":"paid"}">${free?"FREE完整":"预告片"}</span>
-        <span class="pub st-${st}" data-id="${v.video_id}" data-status="${st}"
-              onclick="cyclePublish(event, ${v.video_id})"
-              title="点击切换：待审核 → 可发布 → 不发布 → 待审核">
-          <span class="dot"></span><span class="pubtxt">${PUB_LABELS[st]||"待审核"}</span>
-        </span>
+        <span class="pub st-${st}"><span class="dot"></span><span class="pubtxt">${PUB_LABELS[st]||"待审核"}</span></span>
         ${v.duration?`<span class="dur">${fmtDur(v.duration)}</span>`:""}
       </div>
       <div class="meta">
         <p class="title">${esc(v.title)||"(无标题)"}</p>
         <div class="sub"><span>${esc(v.model&&v.model.username)||""}</span>
         <span>♥ ${v.likes||0}</span></div>
+        <div class="pubrow" onclick="event.stopPropagation()">
+          ${PUB_ORDER.map(s=>`<button type="button" class="pubbtn st-${s} ${st===s?"active":""}"
+                  data-id="${v.video_id}" data-status="${s}"
+                  onclick="setStatus(event, ${v.video_id}, '${s}')">${PUB_LABELS[s]}</button>`).join("")}
+        </div>
       </div></div>`;
   }).join("");
 }
 
 function onSearch(){ clearTimeout(searchTimer); searchTimer=setTimeout(()=>load(1),300); }
 
-async function cyclePublish(ev, videoId){
+async function setStatus(ev, videoId, status){
   ev.stopPropagation();  // 不触发卡片播放
-  const el = ev.currentTarget;
-  const cur = el.dataset.status || "pending";
-  const next = PUB_ORDER[(PUB_ORDER.indexOf(cur)+1) % PUB_ORDER.length];
-  const oldCls = "st-"+cur, newCls = "st-"+next;
-  // 乐观更新 UI
-  el.classList.remove(oldCls); el.classList.add(newCls);
-  el.dataset.status = next;
-  el.querySelector(".pubtxt").textContent = PUB_LABELS[next];
   const card = document.getElementById("card-"+videoId);
-  if(card){ card.classList.remove("st-pending","st-approved","st-rejected"); card.classList.add(newCls); }
+  const oldStatus = card ? (card.dataset.status || (card.className.match(/st-(pending|approved|rejected)/)||[])[1] || "pending") : "pending";
+  // 乐观更新：卡片状态类 + 三个按钮高亮
+  if(card){
+    card.classList.remove("st-pending","st-approved","st-rejected");
+    card.classList.add("st-"+status);
+    card.dataset.status = status;
+    card.querySelectorAll(".pubbtn").forEach(b=>{
+      b.classList.toggle("active", b.dataset.status === status);
+    });
+    const tag = card.querySelector(".pub");
+    if(tag){ tag.className = "pub st-"+status; tag.querySelector(".pubtxt").textContent = PUB_LABELS[status]; }
+  }
   try{
     const r = await fetch("/api/publish-status", {
       method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({video_id: videoId, publish_status: next})
+      body: JSON.stringify({video_id: videoId, publish_status: status})
     });
     if(!r.ok) throw new Error("HTTP "+r.status);
   }catch(err){
     // 失败回滚
-    el.classList.remove(newCls); el.classList.add(oldCls);
-    el.dataset.status = cur;
-    el.querySelector(".pubtxt").textContent = PUB_LABELS[cur];
-    if(card){ card.classList.remove(newCls); card.classList.add(oldCls); }
+    if(card){
+      card.classList.remove("st-"+status); card.classList.add("st-"+oldStatus);
+      card.dataset.status = oldStatus;
+      card.querySelectorAll(".pubbtn").forEach(b=>{
+        b.classList.toggle("active", b.dataset.status === oldStatus);
+      });
+      const tag = card.querySelector(".pub");
+      if(tag){ tag.className = "pub st-"+oldStatus; tag.querySelector(".pubtxt").textContent = PUB_LABELS[oldStatus]; }
+    }
     alert("标注保存失败："+err.message);
   }
 }
