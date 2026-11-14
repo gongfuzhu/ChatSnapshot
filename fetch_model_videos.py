@@ -212,9 +212,9 @@ def to_document(video, model):
         "presets": video.get("presets", []),
         "created_at": video.get("createdAt", ""),
         "fetched_at": datetime.now(timezone.utc).isoformat(),
-        # 发布审核三态：pending 待审核(默认) / approved 可发布 / rejected 不发布。
+        # 发布审核三态：approved 可发布(新视频默认) / pending 待审核 / rejected 不发布。
         # 仅首次插入写入，之后由 Web 页面维护，重复抓取不覆盖（见 save_to_mongo）。
-        "publish_status": "pending",
+        "publish_status": "approved",
     }
 
 
@@ -229,11 +229,11 @@ def save_to_mongo(docs):
         col.create_index([("user_id", ASCENDING), ("created_at", ASCENDING)])
         inserted = updated = 0
         for doc in docs:
-            # publish_status 仅首次插入设默认 pending；从 $set 剔除，
+            # publish_status 仅首次插入设默认 approved（新视频即可发布）；从 $set 剔除，
             # 避免重复抓取覆盖人工在页面上做的审核标注。
             doc = {k: v for k, v in doc.items() if k != "publish_status"}
             set_on_insert = {"first_seen": doc["fetched_at"],
-                             "publish_status": "pending"}
+                             "publish_status": "approved"}
             res = col.update_one(
                 {"_id": doc["_id"]},
                 {"$set": doc, "$setOnInsert": set_on_insert},
