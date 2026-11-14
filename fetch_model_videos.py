@@ -33,6 +33,15 @@ USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 DEFAULT_USER_ID = 289118173
 PAGE_LIMIT = 100
 MAX_RETRIES = 3
+# 模特列表接口（亚洲/语言筛选），用 offset 翻页；{offset} 占位由代码替换。
+MODELS_LIST_URL = (
+    "https://zh.streams.modelapp.org/api/front/models?removeShows=false&recInFeatured=false"
+    "&limit=60&offset={offset}&primaryTag=girls"
+    "&filterGroupTags=%5B%5B%22tagLanguageChinese%22%2C%22tagLanguageVietnamese%22%2C"
+    "%22tagLanguageJapanese%22%5D%2C%5B%22ethnicityAsian%22%5D%5D"
+    "&sortBy=stripRanking&parentTag=ethnicityAsian&nic=true&byw=false&rcmGrp=A&rbCnGr=true"
+    "&iem=true&decMb=true&dmv=false&ctryTop=true&mlfv=false&rectf=false&sac=true"
+)
 
 if sys.stdout.encoding != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -121,6 +130,45 @@ def fetch_all_videos(user_id, proxies):
     return out
 
 
+def adapt_list_model(m):
+    """把模特列表接口的原始字段适配为 to_document 期望的 model 结构。"""
+    return {
+        "id": m.get("id"),
+        "username": m.get("username", ""),
+        "isOnline": m.get("isOnline"),
+        "isModel": m.get("isModel"),
+        "isStudio": m.get("isStudio"),
+        "userRanking": m.get("topBestPlace"),
+        # 列表特有信息一并保留
+        "country": m.get("country", ""),
+        "viewersCount": m.get("viewersCount"),
+        "isLive": m.get("isLive"),
+    }
+
+
+def fetch_models_from_list(max_models, proxies):
+    """翻页拉取模特列表接口，返回适配后的模特列表（最多 max_models 个）。"""
+    headers = build_headers("models")
+    out, offset = [], 0
+    page_size = 60
+    while len(out) < max_models:
+        data = get_json(MODELS_LIST_URL.format(offset=offset), headers, proxies)
+        batch = data.get("models") or []
+        if not batch:
+            break
+        for m in batch:
+            if m.get("id") is not None:
+                out.append(adapt_list_model(m))
+                if len(out) >= max_models:
+                    break
+        log(f"列表 offset={offset}：本页 {len(batch)} 个，累计候选 {len(out)}"
+            f"（filteredCount={data.get('filteredCount')}）")
+        if len(batch) < page_size:
+            break
+        offset += page_size
+    return out[:max_models]
+
+
 def pick_video_url(v):
     """按规则选链：free -> videoUrl，否则 trailerUrl。返回 (url, 来源字段名)。"""
     if v.get("accessMode") == "free":
@@ -142,6 +190,10 @@ def to_document(video, model):
             "is_model": model.get("isModel"),
             "is_studio": model.get("isStudio"),
             "ranking": model.get("userRanking"),
+            # 以下仅模特列表批量模式有值，单模特详情模式为 None
+            "country": model.get("country"),
+            "viewers_count": model.get("viewersCount"),
+            "is_live": model.get("isLive"),
         },
         "title": video.get("title", ""),
         "description": video.get("description", ""),
@@ -188,10 +240,24 @@ def save_to_mongo(docs):
         client.close()
 
 
+def collect_for_model(model, proxies):
+    """对单个模特抓视频并生成文档；单个模特失败不影响整体。"""
+    uid = model.get("id")
+    try:
+        videos = fetch_all_videos(uid, proxies)
+        return [to_document(v, model) for v in videos], None
+    except Exception as e:  # noqa: BLE001
+        return [], f"{type(e).__name__}: {str(e)[:100]}"
+
+
 def main():
     ap = argparse.ArgumentParser(description="抓取模特视频并按规则选链存入 MongoDB")
-    ap.add_argument("--user-id", type=int, nargs="+", default=[DEFAULT_USER_ID],
-                    help=f"模特用户 ID，可多个（默认 {DEFAULT_USER_ID}）")
+    ap.add_argument("--user-id", type=int, nargs="+", default=None,
+                    help=f"指定模特用户 ID，可多个；不指定时默认 {DEFAULT_USER_ID}")
+    ap.add_argument("--from-list", action="store_true",
+                    help="批量模式：从模特列表接口翻页抓取模特，再逐个保存其视频")
+    ap.add_argument("--max-models", type=int, default=60,
+                    help="--from-list 模式最多处理多少个模特（默认 60，即列表第一页）")
     ap.add_argument("--use-proxy", action="store_true",
                     help="经 mihomo 代理访问（默认直连，接口实测可直连）")
     ap.add_argument("--dry-run", action="store_true", help="只抓取打印，不写数据库")
@@ -201,24 +267,48 @@ def main():
     if args.use_proxy:
         proxies = {"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"}
 
-    all_docs = []
-    for uid in args.user_id:
-        log(f"===== 处理模特 user_id={uid} =====")
-        model = fetch_model(uid, proxies)
-        log(f"模特: {model.get('username') or '(无用户名)'}  在线={model.get('isOnline')}")
-        videos = fetch_all_videos(uid, proxies)
-        docs = [to_document(v, model) for v in videos]
+    # 确定要处理的模特列表（统一为适配后的 model dict）
+    if args.from_list:
+        log(f"===== 批量模式：从模特列表抓取，最多 {args.max_models} 个 =====")
+        models = fetch_models_from_list(args.max_models, proxies)
+        log(f"列表返回 {len(models)} 个候选模特")
+    else:
+        uids = args.user_id or [DEFAULT_USER_ID]
+        models = [fetch_model(uid, proxies) for uid in uids]
+
+    all_docs, empty, failed = [], 0, []
+    for i, model in enumerate(models, 1):
+        uid = model.get("id")
+        uname = model.get("username") or "(无用户名)"
+        log(f"[{i}/{len(models)}] 模特 {uname} (id={uid})")
+        docs, err = collect_for_model(model, proxies)
+        if err:
+            failed.append((uname, err))
+            log(f"  [跳过] 抓取失败：{err}")
+            continue
+        if not docs:
+            empty += 1
+            log("  无视频，跳过")
+            continue
         for d in docs:
             log(f"  视频 {d['video_id']} [{d['access_mode']}] -> {d['url_field']} "
                 f"| {d['title'][:24]}")
         all_docs.extend(docs)
 
-    log(f"合计 {len(all_docs)} 条视频文档")
+    log(f"统计：模特 {len(models)} 个 | 有视频并入库候选 {len(models)-empty-len(failed)} 个 "
+        f"| 无视频 {empty} 个 | 失败 {len(failed)} 个 | 视频文档 {len(all_docs)} 条")
+    if failed:
+        log("失败明细：" + "；".join(f"{n}({e})" for n, e in failed[:10]))
+
     if args.dry_run:
-        log("[dry-run] 不写库。样例文档：")
+        log("[dry-run] 不写库。")
         if all_docs:
             import json
             print(json.dumps(all_docs[0], ensure_ascii=False, indent=1))
+        return 0
+
+    if not all_docs:
+        log("没有可写入的视频文档，结束。")
         return 0
 
     inserted, updated = save_to_mongo(all_docs)
