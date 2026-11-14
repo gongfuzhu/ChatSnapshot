@@ -26,6 +26,9 @@ from pymongo.errors import OperationFailure
 from model_db_config import MONGO_URI, MONGO_DB, MONGO_COLLECTION
 
 DEFAULT_PORT = 8088
+# 发布审核三态
+PUBLISH_STATUSES = ("pending", "approved", "rejected")
+PUBLISH_LABELS = {"pending": "待审核", "approved": "可发布", "rejected": "不发布"}
 
 
 def get_collection():
@@ -50,9 +53,9 @@ def build_query(params):
             {"description": {"$regex": rx, "$options": "i"}},
             {"model.username": {"$regex": rx, "$options": "i"}},
         ]
-    pub = params.get("publishable", [None])[0]
-    if pub in ("true", "false"):
-        q["publishable"] = (pub == "true")
+    pub = params.get("publish_status", [None])[0]
+    if pub in PUBLISH_STATUSES:
+        q["publish_status"] = pub
     return q
 
 
@@ -91,11 +94,14 @@ PAGE_HTML = """<!DOCTYPE html>
   .dur{position:absolute;bottom:8px;right:8px;background:rgba(0,0,0,.75);
        font-size:11px;padding:2px 7px;border-radius:6px}
   .pub{position:absolute;top:8px;right:8px;display:flex;align-items:center;gap:5px;
-       background:rgba(0,0,0,.72);border-radius:20px;padding:4px 9px;font-size:11px;
+       background:rgba(0,0,0,.72);border-radius:20px;padding:4px 10px;font-size:11px;
        cursor:pointer;user-select:none;border:1px solid var(--line);color:var(--mut)}
-  .pub.on{background:rgba(31,157,85,.92);color:#fff;border-color:var(--free)}
+  .pub:hover{filter:brightness(1.25)}
+  .pub.st-approved{background:rgba(31,157,85,.92);color:#fff;border-color:var(--free)}
+  .pub.st-rejected{background:rgba(200,50,60,.92);color:#fff;border-color:#c8323c}
   .pub .dot{width:8px;height:8px;border-radius:50%;background:currentColor}
-  .card.marked{border-color:var(--free)}
+  .card.st-approved{border-color:var(--free)}
+  .card.st-rejected{border-color:#c8323c;opacity:.82}
   .meta{padding:10px 12px}
   .title{font-size:14px;line-height:1.4;margin:0 0 6px;
        display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:39px}
@@ -127,8 +133,9 @@ PAGE_HTML = """<!DOCTYPE html>
   <select id="modelFilter" onchange="load(1)"><option value="">全部模特</option></select>
   <select id="pubFilter" onchange="load(1)">
     <option value="">全部标注</option>
-    <option value="true">仅可发布</option>
-    <option value="false">仅未标注</option>
+    <option value="pending">待审核</option>
+    <option value="approved">可发布</option>
+    <option value="rejected">不发布</option>
   </select>
 </header>
 <div class="grid" id="grid"></div>
@@ -156,6 +163,8 @@ PAGE_HTML = """<!DOCTYPE html>
 <script>
 let page = 1, totalPages = 1, searchTimer = null, hls = null;
 const PAGE_SIZE = 24;
+const PUB_ORDER = ["pending","approved","rejected"];
+const PUB_LABELS = {pending:"待审核", approved:"可发布", rejected:"不发布"};
 const esc = s => (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const fmtDur = s => s==null?"":(Math.floor(s/60)+":"+String(s%60).padStart(2,"0"));
 
@@ -167,7 +176,7 @@ async function load(p){
   const params = new URLSearchParams({page:String(p), page_size:String(PAGE_SIZE)});
   if(q) params.set("q", q);
   if(uid) params.set("user_id", uid);
-  if(pub) params.set("publishable", pub);
+  if(pub) params.set("publish_status", pub);
   const r = await fetch("/api/videos?"+params);
   const data = await r.json();
   totalPages = Math.max(1, Math.ceil(data.total / data.page_size));
@@ -179,14 +188,14 @@ async function load(p){
   if(!data.items.length){ grid.innerHTML='<div class="empty">没有匹配的视频</div>'; return; }
   grid.innerHTML = data.items.map(v=>{
     const free = v.access_mode==="free";
-    const marked = v.publishable === true;
-    return `<div class="card ${marked?"marked":""}" id="card-${v.video_id}" onclick='play(${JSON.stringify(v).replace(/'/g,"&#39;")})'>
+    const st = v.publish_status || "pending";
+    return `<div class="card st-${st}" id="card-${v.video_id}" onclick='play(${JSON.stringify(v).replace(/'/g,"&#39;")})'>
       <div class="thumb" style="background-image:url('${esc(v.cover_url)}')">
         <span class="badge ${free?"free":"paid"}">${free?"FREE完整":"预告片"}</span>
-        <span class="pub ${marked?"on":""}" data-id="${v.video_id}"
-              onclick="togglePublish(event, ${v.video_id})"
-              title="切换是否可发布（用于后续自动发布）">
-          <span class="dot"></span><span class="pubtxt">${marked?"可发布":"待审核"}</span>
+        <span class="pub st-${st}" data-id="${v.video_id}" data-status="${st}"
+              onclick="cyclePublish(event, ${v.video_id})"
+              title="点击切换：待审核 → 可发布 → 不发布 → 待审核">
+          <span class="dot"></span><span class="pubtxt">${PUB_LABELS[st]||"待审核"}</span>
         </span>
         ${v.duration?`<span class="dur">${fmtDur(v.duration)}</span>`:""}
       </div>
@@ -200,25 +209,30 @@ async function load(p){
 
 function onSearch(){ clearTimeout(searchTimer); searchTimer=setTimeout(()=>load(1),300); }
 
-async function togglePublish(ev, videoId){
+async function cyclePublish(ev, videoId){
   ev.stopPropagation();  // 不触发卡片播放
   const el = ev.currentTarget;
-  const willOn = !el.classList.contains("on");
+  const cur = el.dataset.status || "pending";
+  const next = PUB_ORDER[(PUB_ORDER.indexOf(cur)+1) % PUB_ORDER.length];
+  const oldCls = "st-"+cur, newCls = "st-"+next;
   // 乐观更新 UI
-  el.classList.toggle("on", willOn);
-  el.querySelector(".pubtxt").textContent = willOn ? "可发布" : "待审核";
-  document.getElementById("card-"+videoId)?.classList.toggle("marked", willOn);
+  el.classList.remove(oldCls); el.classList.add(newCls);
+  el.dataset.status = next;
+  el.querySelector(".pubtxt").textContent = PUB_LABELS[next];
+  const card = document.getElementById("card-"+videoId);
+  if(card){ card.classList.remove("st-pending","st-approved","st-rejected"); card.classList.add(newCls); }
   try{
-    const r = await fetch("/api/publishable", {
+    const r = await fetch("/api/publish-status", {
       method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({video_id: videoId, publishable: willOn})
+      body: JSON.stringify({video_id: videoId, publish_status: next})
     });
     if(!r.ok) throw new Error("HTTP "+r.status);
   }catch(err){
     // 失败回滚
-    el.classList.toggle("on", !willOn);
-    el.querySelector(".pubtxt").textContent = willOn ? "待审核" : "可发布";
-    document.getElementById("card-"+videoId)?.classList.toggle("marked", !willOn);
+    el.classList.remove(newCls); el.classList.add(oldCls);
+    el.dataset.status = cur;
+    el.querySelector(".pubtxt").textContent = PUB_LABELS[cur];
+    if(card){ card.classList.remove(newCls); card.classList.add(oldCls); }
     alert("标注保存失败："+err.message);
   }
 }
@@ -267,6 +281,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        # 禁用缓存，确保每次拿到最新前端代码（修过的按钮/字段立即生效）
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
         self.end_headers()
         self.wfile.write(data)
 
@@ -292,8 +309,8 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             raw = self.rfile.read(length) if length else b"{}"
             payload = json.loads(raw.decode("utf-8") or "{}")
-            if parsed.path == "/api/publishable":
-                return self._set_publishable(payload)
+            if parsed.path == "/api/publish-status":
+                return self._set_publish_status(payload)
             self._send(404, json.dumps({"error": "not found"}))
         except json.JSONDecodeError:
             self._send(400, json.dumps({"error": "invalid JSON"}, ensure_ascii=False))
@@ -302,21 +319,22 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             self._send(500, json.dumps({"error": str(e)}, ensure_ascii=False))
 
-    def _set_publishable(self, payload):
-        """更新单条视频的 publishable 布尔标注。"""
+    def _set_publish_status(self, payload):
+        """更新单条视频的发布审核状态（pending/approved/rejected）。"""
         video_id = payload.get("video_id")
-        value = payload.get("publishable")
-        if not isinstance(video_id, int) or not isinstance(value, bool):
+        status = payload.get("publish_status")
+        if not isinstance(video_id, int) or status not in PUBLISH_STATUSES:
             return self._send(400, json.dumps(
-                {"error": "需要 int video_id 与 bool publishable"}, ensure_ascii=False))
+                {"error": f"需要 int video_id 与 publish_status∈{list(PUBLISH_STATUSES)}"},
+                ensure_ascii=False))
         client, col = get_collection()
         try:
             res = col.update_one({"video_id": video_id},
-                                 {"$set": {"publishable": value}})
+                                 {"$set": {"publish_status": status}})
             if res.matched_count == 0:
                 return self._send(404, json.dumps({"error": "video not found"}))
             self._send(200, json.dumps({"ok": True, "video_id": video_id,
-                                        "publishable": value}))
+                                        "publish_status": status}))
         finally:
             client.close()
 
