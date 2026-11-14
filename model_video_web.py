@@ -31,9 +31,19 @@ PUBLISH_STATUSES = ("pending", "approved", "rejected")
 PUBLISH_LABELS = {"pending": "待审核", "approved": "可发布", "rejected": "不发布"}
 
 
+_shared_client = None
+
+
 def get_collection():
-    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=12000)
-    return client, client[MONGO_DB][MONGO_COLLECTION]
+    """返回全局共享的 MongoClient 与集合（连接池单例）。
+
+    复用单一长连接客户端，避免每个 HTTP 请求都新建 client、重新做副本集拓扑
+    发现——在到 Atlas 网络抖动时，反复重连极易触发 ServerSelectionTimeout。
+    """
+    global _shared_client
+    if _shared_client is None:
+        _shared_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=12000)
+    return _shared_client, _shared_client[MONGO_DB][MONGO_COLLECTION]
 
 
 def build_query(params):
@@ -336,7 +346,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps({"ok": True, "video_id": video_id,
                                         "publish_status": status}))
         finally:
-            client.close()
+            pass  # 共享连接池，不关闭 client
 
     def _videos(self, params):
         client, col = get_collection()
@@ -359,7 +369,7 @@ class Handler(BaseHTTPRequestHandler):
                 {"total": total, "page": page, "page_size": page_size, "items": items},
                 ensure_ascii=False, default=str))
         finally:
-            client.close()
+            pass  # 共享连接池，不关闭 client
 
     def _models(self):
         client, col = get_collection()
@@ -374,7 +384,7 @@ class Handler(BaseHTTPRequestHandler):
             models = list(col.aggregate(pipeline))
             self._send(200, json.dumps({"models": models}, ensure_ascii=False, default=str))
         finally:
-            client.close()
+            pass  # 共享连接池，不关闭 client
 
     def log_message(self, fmt, *args):  # 精简日志
         print(f"[web] {self.address_string()} {fmt % args}")
@@ -385,13 +395,10 @@ def main():
     ap.add_argument("--host", default="0.0.0.0", help="监听地址（默认全网卡，内网可访问）")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     args = ap.parse_args()
-    # 启动前探测一次数据库
+    # 启动前探测一次数据库（共享连接池，不关闭）
     client, col = get_collection()
-    try:
-        client.admin.command("ping")
-        print(f"[web] 已连接 {MONGO_DB}.{MONGO_COLLECTION}，现有 {col.count_documents({})} 条视频")
-    finally:
-        client.close()
+    client.admin.command("ping")
+    print(f"[web] 已连接 {MONGO_DB}.{MONGO_COLLECTION}，现有 {col.count_documents({})} 条视频")
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"[web] 视频浏览服务启动: http://{args.host}:{args.port}/")
     print(f"[web] 本机访问 http://127.0.0.1:{args.port}/ ，局域网用 http://<本机IP>:{args.port}/")
