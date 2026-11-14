@@ -392,7 +392,9 @@ class Handler(BaseHTTPRequestHandler):
                 page = 1
             total = col.count_documents(q)
             cursor = (col.find(q, {"_id": 0})
-                      .sort([("created_at", -1), ("video_id", -1)])
+                      # 按入库时间 first_seen 倒序（最新进入数据库的在前），
+                      # video_id 倒序作为同一入库批次内的稳定兜底次序。
+                      .sort([("first_seen", -1), ("video_id", -1)])
                       .skip((page - 1) * page_size).limit(page_size))
             items = list(cursor)
             self._send(200, json.dumps(
