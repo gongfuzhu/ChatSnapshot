@@ -2,3 +2,5 @@ requests
 pillow
 playwright
 beautifulsoup4
+pymongo
+dnspython
