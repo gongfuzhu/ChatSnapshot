@@ -25,6 +25,7 @@ from playwright.sync_api import sync_playwright
 from model_db_config import MONGO_URI, MONGO_DB, MONGO_COLLECTION
 from upload_grid_to_x import (
     DEBUG_PORT,
+    LIVE_URL,
     ensure_browser,
     upload_media_to_x,
 )
@@ -109,7 +110,7 @@ def mark_published(col, video_id):
 
 
 def build_text_for(doc):
-    """用模特名 + 视频标题生成发帖文案（视频库内容，非直播，不用直播话术）。"""
+    """用模特名 + 视频标题 + 模特直播链接生成发帖文案（视频库内容，非直播话术）。"""
     username = ((doc.get("model") or {}).get("username") or "").strip()
     title = clean_topic(doc.get("title", "") or "")
     parts = []
@@ -117,6 +118,7 @@ def build_text_for(doc):
         parts.append(title)
     if username:
         parts.append(f"模特：{username}")
+        parts.append(LIVE_URL.replace("{username}", username))
     if not parts:
         parts.append("精选视频分享")
     parts.append("#模特 #视频")

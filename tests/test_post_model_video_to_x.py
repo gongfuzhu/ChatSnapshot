@@ -149,17 +149,27 @@ def test_mark_published_sets_flag_and_timestamp():
     assert pm.find_pending(col) == []
 
 
-def test_build_text_for_uses_model_and_title():
+def test_build_text_for_uses_model_title_and_live_url():
     doc = {"model": {"username": "JUJU8030"}, "title": "恶魔来榨精了"}
     text = pm.build_text_for(doc)
     assert "JUJU8030" in text
     assert "恶魔来榨精了" in text
+    # 直播链接按 username 拼出并出现在文案中
+    assert "https://zh.streams.modelapp.org/JUJU8030" in text
 
 
 def test_build_text_for_empty_title_does_not_raise():
     doc = {"model": {"username": "abc"}, "title": ""}
     text = pm.build_text_for(doc)
     assert "abc" in text
+    assert "https://zh.streams.modelapp.org/abc" in text
+
+
+def test_build_text_for_no_username_has_no_link():
+    doc = {"model": {}, "title": "仅标题"}
+    text = pm.build_text_for(doc)
+    assert "仅标题" in text
+    assert "https://" not in text
 
 
 if __name__ == "__main__":
