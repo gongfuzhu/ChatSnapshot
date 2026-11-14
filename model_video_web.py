@@ -50,6 +50,9 @@ def build_query(params):
             {"description": {"$regex": rx, "$options": "i"}},
             {"model.username": {"$regex": rx, "$options": "i"}},
         ]
+    pub = params.get("publishable", [None])[0]
+    if pub in ("true", "false"):
+        q["publishable"] = (pub == "true")
     return q
 
 
@@ -87,6 +90,12 @@ PAGE_HTML = """<!DOCTYPE html>
   .badge.free{background:var(--free)} .badge.paid{background:var(--paid)}
   .dur{position:absolute;bottom:8px;right:8px;background:rgba(0,0,0,.75);
        font-size:11px;padding:2px 7px;border-radius:6px}
+  .pub{position:absolute;top:8px;right:8px;display:flex;align-items:center;gap:5px;
+       background:rgba(0,0,0,.72);border-radius:20px;padding:4px 9px;font-size:11px;
+       cursor:pointer;user-select:none;border:1px solid var(--line);color:var(--mut)}
+  .pub.on{background:rgba(31,157,85,.92);color:#fff;border-color:var(--free)}
+  .pub .dot{width:8px;height:8px;border-radius:50%;background:currentColor}
+  .card.marked{border-color:var(--free)}
   .meta{padding:10px 12px}
   .title{font-size:14px;line-height:1.4;margin:0 0 6px;
        display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:39px}
@@ -116,6 +125,11 @@ PAGE_HTML = """<!DOCTYPE html>
   <h1>模特视频库<small id="count"></small></h1>
   <input id="search" placeholder="搜索标题 / 模特名…" oninput="onSearch()">
   <select id="modelFilter" onchange="load(1)"><option value="">全部模特</option></select>
+  <select id="pubFilter" onchange="load(1)">
+    <option value="">全部标注</option>
+    <option value="true">仅可发布</option>
+    <option value="false">仅未标注</option>
+  </select>
 </header>
 <div class="grid" id="grid"></div>
 <div class="pager">
@@ -149,9 +163,11 @@ async function load(p){
   page = p;
   const q = document.getElementById("search").value.trim();
   const uid = document.getElementById("modelFilter").value;
+  const pub = document.getElementById("pubFilter").value;
   const params = new URLSearchParams({page:String(p), page_size:String(PAGE_SIZE)});
   if(q) params.set("q", q);
   if(uid) params.set("user_id", uid);
+  if(pub) params.set("publishable", pub);
   const r = await fetch("/api/videos?"+params);
   const data = await r.json();
   totalPages = Math.max(1, Math.ceil(data.total / data.page_size));
@@ -163,9 +179,15 @@ async function load(p){
   if(!data.items.length){ grid.innerHTML='<div class="empty">没有匹配的视频</div>'; return; }
   grid.innerHTML = data.items.map(v=>{
     const free = v.access_mode==="free";
-    return `<div class="card" onclick='play(${JSON.stringify(v).replace(/'/g,"&#39;")})'>
+    const marked = v.publishable === true;
+    return `<div class="card ${marked?"marked":""}" id="card-${v.video_id}" onclick='play(${JSON.stringify(v).replace(/'/g,"&#39;")})'>
       <div class="thumb" style="background-image:url('${esc(v.cover_url)}')">
         <span class="badge ${free?"free":"paid"}">${free?"FREE完整":"预告片"}</span>
+        <span class="pub ${marked?"on":""}" data-id="${v.video_id}"
+              onclick="togglePublish(event, ${v.video_id})"
+              title="切换是否可发布（用于后续自动发布）">
+          <span class="dot"></span><span class="pubtxt">${marked?"可发布":"待审核"}</span>
+        </span>
         ${v.duration?`<span class="dur">${fmtDur(v.duration)}</span>`:""}
       </div>
       <div class="meta">
@@ -177,6 +199,29 @@ async function load(p){
 }
 
 function onSearch(){ clearTimeout(searchTimer); searchTimer=setTimeout(()=>load(1),300); }
+
+async function togglePublish(ev, videoId){
+  ev.stopPropagation();  // 不触发卡片播放
+  const el = ev.currentTarget;
+  const willOn = !el.classList.contains("on");
+  // 乐观更新 UI
+  el.classList.toggle("on", willOn);
+  el.querySelector(".pubtxt").textContent = willOn ? "可发布" : "待审核";
+  document.getElementById("card-"+videoId)?.classList.toggle("marked", willOn);
+  try{
+    const r = await fetch("/api/publishable", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({video_id: videoId, publishable: willOn})
+    });
+    if(!r.ok) throw new Error("HTTP "+r.status);
+  }catch(err){
+    // 失败回滚
+    el.classList.toggle("on", !willOn);
+    el.querySelector(".pubtxt").textContent = willOn ? "待审核" : "可发布";
+    document.getElementById("card-"+videoId)?.classList.toggle("marked", !willOn);
+    alert("标注保存失败："+err.message);
+  }
+}
 
 async function loadModels(){
   const r = await fetch("/api/models"); const data = await r.json();
@@ -240,6 +285,40 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, json.dumps({"error": f"DB error: {e}"}, ensure_ascii=False))
         except Exception as e:  # noqa: BLE001
             self._send(500, json.dumps({"error": str(e)}, ensure_ascii=False))
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length) if length else b"{}"
+            payload = json.loads(raw.decode("utf-8") or "{}")
+            if parsed.path == "/api/publishable":
+                return self._set_publishable(payload)
+            self._send(404, json.dumps({"error": "not found"}))
+        except json.JSONDecodeError:
+            self._send(400, json.dumps({"error": "invalid JSON"}, ensure_ascii=False))
+        except OperationFailure as e:
+            self._send(500, json.dumps({"error": f"DB error: {e}"}, ensure_ascii=False))
+        except Exception as e:  # noqa: BLE001
+            self._send(500, json.dumps({"error": str(e)}, ensure_ascii=False))
+
+    def _set_publishable(self, payload):
+        """更新单条视频的 publishable 布尔标注。"""
+        video_id = payload.get("video_id")
+        value = payload.get("publishable")
+        if not isinstance(video_id, int) or not isinstance(value, bool):
+            return self._send(400, json.dumps(
+                {"error": "需要 int video_id 与 bool publishable"}, ensure_ascii=False))
+        client, col = get_collection()
+        try:
+            res = col.update_one({"video_id": video_id},
+                                 {"$set": {"publishable": value}})
+            if res.matched_count == 0:
+                return self._send(404, json.dumps({"error": "video not found"}))
+            self._send(200, json.dumps({"ok": True, "video_id": video_id,
+                                        "publishable": value}))
+        finally:
+            client.close()
 
     def _videos(self, params):
         client, col = get_collection()
