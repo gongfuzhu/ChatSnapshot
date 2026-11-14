@@ -66,6 +66,12 @@ def build_query(params):
     pub = params.get("publish_status", [None])[0]
     if pub in PUBLISH_STATUSES:
         q["publish_status"] = pub
+    access = params.get("access", [None])[0]
+    if access == "free":
+        q["access_mode"] = "free"
+    elif access == "paid":
+        # 非 free（付费/粉丝俱乐部等，存的是预告片链接）
+        q["access_mode"] = {"$ne": "free"}
     return q
 
 
@@ -155,6 +161,11 @@ PAGE_HTML = """<!DOCTYPE html>
     <option value="approved">可发布</option>
     <option value="rejected">不发布</option>
   </select>
+  <select id="accessFilter" onchange="load(1)">
+    <option value="">全部类型</option>
+    <option value="free">仅 FREE 完整</option>
+    <option value="paid">仅预告片</option>
+  </select>
 </header>
 <div class="grid" id="grid"></div>
 <div class="pager">
@@ -191,10 +202,12 @@ async function load(p){
   const q = document.getElementById("search").value.trim();
   const uid = document.getElementById("modelFilter").value;
   const pub = document.getElementById("pubFilter").value;
+  const access = document.getElementById("accessFilter").value;
   const params = new URLSearchParams({page:String(p), page_size:String(PAGE_SIZE)});
   if(q) params.set("q", q);
   if(uid) params.set("user_id", uid);
   if(pub) params.set("publish_status", pub);
+  if(access) params.set("access", access);
   const r = await fetch("/api/videos?"+params);
   const data = await r.json();
   totalPages = Math.max(1, Math.ceil(data.total / data.page_size));
