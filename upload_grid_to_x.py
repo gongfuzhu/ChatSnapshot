@@ -305,7 +305,18 @@ class XLoginExpiredError(RuntimeError):
 
 
 def upload_media_to_x(page, media_path, post_text=""):
-    """在给定页面上传媒体（图片或视频）并发布。post_text 为最终文案（已完成占位符替换）。"""
+    """在给定页面上传媒体（图片或视频）并发布。post_text 为最终文案（已完成占位符替换）。
+
+    media_path 既支持单个路径字符串，也支持路径列表（多视频合并为同一条推文，
+    X 单条最多 4 个视频）。单字符串行为与历史完全一致。
+    """
+    # 归一化为绝对路径列表，单文件/多文件统一处理
+    if isinstance(media_path, (str, os.PathLike)):
+        media_paths = [os.path.abspath(str(media_path))]
+    else:
+        media_paths = [os.path.abspath(str(p)) for p in media_path]
+    if not media_paths:
+        raise ValueError("upload_media_to_x 需要至少一个媒体文件")
     # 先去首页，确保登录态正常、页面完全加载，避免直接跳发帖页时状态异常
     page.goto("https://x.com/home", wait_until="domcontentloaded")
     page.wait_for_timeout(3000)
@@ -373,14 +384,18 @@ def upload_media_to_x(page, media_path, post_text=""):
     if post_text:
         editor.type(post_text)
 
-    # 上传媒体
+    # 上传媒体（多文件一次选中，合并到同一条推文）
     page.wait_for_selector('input[type="file"]', timeout=10000)
     file_input = page.locator('input[type="file"]').first
 
     # 用绝对路径，避免工作目录问题
-    abs_path = os.path.abspath(media_path)
-    print(f"上传媒体: {abs_path} ({os.path.getsize(abs_path)} 字节)")
-    file_input.set_input_files(abs_path)
+    for ap in media_paths:
+        if not os.path.exists(ap):
+            raise FileNotFoundError(f"待上传媒体不存在: {ap}")
+    print(f"上传媒体 {len(media_paths)} 个: "
+          f"{[os.path.basename(p) for p in media_paths]}")
+    # set_input_files 接受路径列表，X 会把它们作为同一条推文的多个附件
+    file_input.set_input_files(media_paths if len(media_paths) > 1 else media_paths[0])
 
     # 等待媒体出现在编辑区（通过检测媒体预览元素）
     print("等待媒体上传完成...")

@@ -65,8 +65,66 @@ class FakeCol:
                 return _Res(1)
         return _Res(0)
 
+    def update_many(self, filt, update):
+        ids = set(filt.get("video_id", {}).get("$in", []))
+        n = 0
+        for d in self.docs:
+            if d.get("video_id") in ids:
+                d.update(update.get("$set", {}))
+                n += 1
+        return _Res(n)
+
+    def delete_one(self, filt):
+        before = len(self.docs)
+        self.docs = [d for d in self.docs if d.get("video_id") != filt["video_id"]]
+        return type("R", (), {"deleted_count": before - len(self.docs)})()
+
+    def aggregate(self, pipeline):
+        """仅支持 select_next_model 用到的 match+group(min)+sort+limit 固定管道。"""
+        rows = list(self.docs)
+        for stage in pipeline:
+            if "$match" in stage:
+                rows = [d for d in rows if _cursor_match(d, stage["$match"])]
+            elif "$group" in stage:
+                key = stage["$group"]["_id"]
+                field = stage["$group"]["oldest"]["$min"].lstrip("$")
+                groups = {}
+                for d in rows:
+                    uname = d.get("model", {}).get("username", "")
+                    groups.setdefault(uname, []).append(d.get(field) or "")
+                rows = [{"_id": u, "oldest": min(v) if v else ""}
+                        for u, v in groups.items()]
+            elif "$sort" in stage:
+                field = next(iter(stage["$sort"]))
+                rows.sort(key=lambda r: r.get(field) or "")
+            elif "$limit" in stage:
+                rows = rows[: stage["$limit"]]
+        return iter(rows)
+
     def create_index(self, *a, **k):
         return None
+
+
+def _cursor_match(d, cond):
+    for k, c in cond.items():
+        val = _get_nested(d, k)
+        if isinstance(c, dict) and "$ne" in c:
+            if val == c["$ne"]:
+                return False
+        else:
+            if val != c:
+                return False
+    return True
+
+
+def _get_nested(d, dotted):
+    """支持 'model.username' 点号路径取值。"""
+    cur = d
+    for part in dotted.split("."):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+    return cur
 
 
 class _Cursor:
@@ -85,14 +143,7 @@ class _Cursor:
         return self
 
     def _match(self, d):
-        for k, cond in self.query.items():
-            if isinstance(cond, dict) and "$ne" in cond:
-                if d.get(k) == cond["$ne"]:
-                    return False
-            else:
-                if d.get(k) != cond:
-                    return False
-        return True
+        return _cursor_match(d, self.query)
 
     def __iter__(self):
         rows = [d for d in self.col.docs if self._match(d)]
@@ -172,7 +223,7 @@ def test_build_text_for_no_username_has_no_link():
     assert "https://" not in text
 
 
-# ---------- 失效(410)处理：删除并换下一条 ----------
+# ---------- 失效(410)处理：先刷新链接重试，刷新不到才删除 ----------
 
 class _DelRes:
     def __init__(self, n):
@@ -189,7 +240,7 @@ class FakeDelCol:
         return _DelRes(1)
 
     def update_one(self, filt, update):
-        self.updated.append(filt["video_id"])
+        self.updated.append((filt["video_id"], update))
 
     def create_index(self, *a, **k):
         return None
@@ -208,19 +259,51 @@ def test_expired_link_error_class_exists():
     assert issubclass(pm.ExpiredLinkError, RuntimeError)
 
 
-def test_process_one_deletes_expired_in_normal_mode(monkeypatch):
+def test_process_one_deletes_expired_when_refresh_unavailable(monkeypatch):
     col = FakeDelCol()
 
     def boom(doc, dry_run=False):
         raise pm.ExpiredLinkError("410 Gone")
 
     monkeypatch.setattr(pm, "publish_one", boom)
+    # 接口已不再返回该视频 -> 刷新失败 -> 走删除兜底
+    monkeypatch.setattr(pm, "fetch_all_videos", lambda uid, proxies: [])
     monkeypatch.setattr(os.path, "exists", lambda p: False)
-    doc = {"video_id": 9001}
+    doc = {"video_id": 9001, "user_id": 123}
     result = pm._process_one(col, doc, _args(), allow_skip=True)
     assert result == "expired"
-    assert col.deleted == [9001]          # 失效即删除
+    assert col.deleted == [9001]          # 刷新不到才删除
     assert col.updated == []              # 未回写发布标记
+
+
+def test_process_one_refresh_then_retry_publishes(monkeypatch):
+    col = FakeDelCol()
+    state = {"calls": 0}
+
+    def flaky(doc, dry_run=False):
+        state["calls"] += 1
+        # 第一次旧链接 410；刷新后第二次成功
+        if state["calls"] == 1:
+            raise pm.ExpiredLinkError("410 Gone")
+        return True
+
+    monkeypatch.setattr(pm, "publish_one", flaky)
+    new_url = "https://x/master.m3u8?md5=new&expires=999"
+    monkeypatch.setattr(pm, "fetch_all_videos",
+                        lambda uid, proxies: [{"id": 9001, "accessMode": "free",
+                                               "videoUrl": new_url}])
+    monkeypatch.setattr(os.path, "exists", lambda p: False)
+    doc = {"video_id": 9001, "user_id": 123,
+           "video_url": "https://x/master.m3u8?md5=old&expires=1"}
+    result = pm._process_one(col, doc, _args(), allow_skip=True)
+    assert result == "published"
+    assert state["calls"] == 2            # 失效后用新链接重试了一次
+    assert col.deleted == []              # 刷新成功，不删除
+    assert col.updated                     # 先刷新写库、再回写发布标记
+    assert doc["video_url"] == new_url    # 内存 doc 已换成新链接
+    # 第一条 update_one 是刷新链接写入
+    refresh_update = col.updated[0][1]["$set"]
+    assert refresh_update["video_url"] == new_url
 
 
 def test_process_one_dry_run_reports_expired_but_keeps_data(monkeypatch):
@@ -243,7 +326,7 @@ def test_process_one_published_marks_and_does_not_delete(monkeypatch):
     result = pm._process_one(col, {"video_id": 9003}, _args(), allow_skip=True)
     assert result == "published"
     assert col.deleted == []
-    assert col.updated == [9003]          # 成功才回写 x_published
+    assert [vid for vid, _ in col.updated] == [9003]   # 成功才回写 x_published
 
 
 def test_process_one_other_failure_keeps_for_retry(monkeypatch):
@@ -272,80 +355,155 @@ def test_download_video_raises_expired_on_410(monkeypatch):
         pm.download_video("https://x/master.m3u8?md5=z", "/tmp/o.mp4")
 
 
-# ---------- main 队列循环：失效删除后自动换下一条 ----------
+# ---------- 按模特维度：选组、free 优先、多视频合并 ----------
 
-class _QueueCursor:
-    def __init__(self, docs):
-        self._docs = docs
-
-    def sort(self, *a, **k):
-        return self
-
-    def limit(self, n):
-        return self
-
-    def __iter__(self):
-        return iter(self._docs)
+def _vdoc(vid, username, created, access="paid", published=None):
+    return {"video_id": vid, "publish_status": "approved", "x_published": published,
+            "created_at": created, "access_mode": access,
+            "video_url": f"https://x/{vid}.mp4",
+            "model": {"username": username}, "title": "t"}
 
 
-class QueueCol(FakeDelCol):
-    """模拟发布队列：前两次取队列返回含失效头部，删除后失效项消失。"""
-    def __init__(self, docs):
-        super().__init__()
-        self._docs = docs
+def test_sort_videos_group_free_first_and_caps_at_four():
+    docs = [
+        _vdoc(1, "m", "2026-01-01", "paid"),
+        _vdoc(2, "m", "2026-01-02", "free"),
+        _vdoc(3, "m", "2026-01-03", "paid"),
+        _vdoc(4, "m", "2026-01-04", "free"),
+        _vdoc(5, "m", "2026-01-05", "paid"),
+        _vdoc(6, "m", "2026-01-06", "free"),
+    ]
+    group = pm.sort_videos_for_group(docs, group_size=4)
+    assert len(group) == 4                      # 最多 4 条
+    # free 全部排前且组内按 created_at FIFO
+    assert [d["video_id"] for d in group] == [2, 4, 6, 1]
+    assert all(d["access_mode"] == "free" for d in group[:3])
 
-    def find(self, query, *a, **k):
-        return _QueueCursor(list(self._docs))
 
-    def delete_one(self, filt):
-        vid = filt["video_id"]
-        before = len(self._docs)
-        self._docs = [d for d in self._docs if d["video_id"] != vid]
-        self.deleted.append(vid)
-        return _DelRes(before - len(self._docs))
+def test_sort_videos_group_fewer_than_four_returns_all():
+    docs = [_vdoc(1, "m", "2026-01-01"), _vdoc(2, "m", "2026-01-02", "free")]
+    group = pm.sort_videos_for_group(docs, group_size=4)
+    assert len(group) == 2                      # 不足 4 条有几条发几条
 
 
-def test_main_queue_skips_expired_and_publishes_next(monkeypatch):
-    expired_doc = {"video_id": 7001, "video_url": "https://x/a.m3u8"}
-    good_doc = {"video_id": 7002, "video_url": "https://x/b.mp4"}
-    col = QueueCol([expired_doc, good_doc])
+def test_build_group_text_single_model_one_link():
+    docs = [_vdoc(1, "JUJU8030", "2026-01-01"),
+            _vdoc(2, "JUJU8030", "2026-01-02")]
+    text = pm.build_group_text(docs)
+    assert "JUJU8030" in text
+    assert "精选 2 个视频" in text
+    assert text.count("https://zh.streams.modelapp.org/JUJU8030") == 1  # 只写一次链接
+
+
+def test_select_next_model_picks_oldest_pending_model():
+    col = FakeCol([
+        _vdoc(1, "B", "2026-03-01"),
+        _vdoc(2, "A", "2026-01-01"),   # A 的最早待发更早
+        _vdoc(3, "A", "2026-02-01"),
+    ])
+    assert pm.select_next_model(col) == "A"
+
+
+def test_select_next_model_none_when_empty():
+    col = FakeCol([_vdoc(1, "A", "2026-01-01", published=True)])
+    assert pm.select_next_model(col) is None
+
+
+def test_fetch_model_group_only_that_model_and_free_first():
+    col = FakeCol([
+        _vdoc(1, "A", "2026-01-01", "paid"),
+        _vdoc(2, "A", "2026-01-02", "free"),
+        _vdoc(3, "B", "2026-01-03", "free"),   # 别的模特，不应入组
+    ])
+    group = pm.fetch_model_group(col, "A", 4)
+    assert [d["video_id"] for d in group] == [2, 1]   # 仅 A，free 优先
+
+
+def test_publish_group_skips_expired_and_merges_rest(monkeypatch):
+    col = FakeDelCol()
+    docs = [_vdoc(1, "m", "2026-01-01"), _vdoc(2, "m", "2026-01-02"),
+            _vdoc(3, "m", "2026-01-03")]
+
+    def fake_download(col_, doc, dry_run=False):
+        if doc["video_id"] == 2:
+            return None          # 模拟该条 410 失效被删跳过
+        return f"modelx_{doc['video_id']}.mp4"
+
+    uploaded = {}
+
+    def fake_upload(page, paths, text):
+        uploaded["paths"] = paths
+        uploaded["text"] = text
+
+    monkeypatch.setattr(pm, "_download_one", fake_download)
+    monkeypatch.setattr(pm, "ensure_browser", lambda port: (None, False))
+    monkeypatch.setattr(pm.sync_playwright, "__call__", lambda: None, raising=False)
+
+    class _PW:
+        def __enter__(self_inner): return self_inner
+        def __exit__(self_inner, *a): return False
+        class chromium:
+            @staticmethod
+            def connect_over_cdp(url):
+                class B:
+                    contexts = [type("C", (), {"new_page": staticmethod(lambda: object())})()]
+                return B()
+
+    monkeypatch.setattr(pm, "sync_playwright", lambda: _PW())
+    monkeypatch.setattr(pm, "upload_media_to_x", fake_upload)
+    monkeypatch.setattr(os.path, "exists", lambda p: False)
+
+    res = pm.publish_group(col, docs, dry_run=False)
+    assert res["posted"] is True
+    assert res["ok_vids"] == [1, 3]
+    assert res["expired_vids"] == [2]
+    # 两个有效视频作为同一条推文的多个附件
+    assert len(uploaded["paths"]) == 2
+
+
+def test_main_publishes_one_multivideo_post_and_marks_all(monkeypatch):
+    docs = [
+        _vdoc(1, "A", "2026-01-01", "free"),
+        _vdoc(2, "A", "2026-01-02", "paid"),
+        _vdoc(3, "A", "2026-01-03", "free"),
+        _vdoc(4, "B", "2026-02-01", "free"),
+    ]
+    col = FakeCol(docs)
 
     class _Client:
-        def __init__(self, *a, **k):
-            self._col = col
+        def __init__(self_inner, *a, **k):
+            self_inner._col = col
 
-        def __getitem__(self, db):
-            outer = self
+        def __getitem__(self_inner, db):
+            outer = self_inner
 
             class _DB:
-                def __getitem__(self_inner, name):
+                def __getitem__(self_s, name):
                     return outer._col
 
             return _DB()
 
-        def close(self):
+        def close(self_inner):
             pass
 
     monkeypatch.setattr(pm, "MongoClient", _Client)
-    monkeypatch.setattr(os.path, "exists", lambda p: False)
 
-    calls = []
+    seen_groups = []
 
-    def fake_publish(doc, dry_run=False):
-        calls.append(doc["video_id"])
-        if doc["video_id"] == 7001:
-            raise pm.ExpiredLinkError("410 Gone")
-        return True   # 第二条成功
+    def fake_publish_group(col_, group, dry_run=False):
+        seen_groups.append([d["video_id"] for d in group])
+        return {"posted": True, "paths": [], "ok_vids": [d["video_id"] for d in group],
+                "expired_vids": [], "failed_vids": []}
 
-    monkeypatch.setattr(pm, "publish_one", fake_publish)
+    monkeypatch.setattr(pm, "publish_group", fake_publish_group)
     monkeypatch.setattr(sys, "argv", ["post_model_video_to_x.py", "--limit", "1"])
     pm.main()
 
-    # 失效的被删除，有效的被发布；最终发够 1 条
-    assert col.deleted == [7001]
-    assert col.updated == [7002]          # 只有成功的那条回写发布标记
-    assert calls == [7001, 7002]          # 先试失效项，删除后换了下一条
-    assert all(d["video_id"] != 7001 for d in col._docs)
+    # 只处理最早模特 A 的一组（最多4条，这里 A 有3条全取），B 不本轮处理
+    assert seen_groups == [[1, 3, 2]]          # free 优先(FIFO)，A 的 3 条
+    marked = [d["video_id"] for d in col.docs if d.get("x_published") is True]
+    assert sorted(marked) == [1, 2, 3]         # 组内全部批量回写
+    assert not any(d.get("x_published") for d in col.docs if d["video_id"] == 4)
 
 
 if __name__ == "__main__":
