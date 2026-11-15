@@ -391,8 +391,17 @@ def test_build_group_text_single_model_one_link():
             _vdoc(2, "JUJU8030", "2026-01-02")]
     text = pm.build_group_text(docs)
     assert "JUJU8030" in text
-    assert "精选 2 个视频" in text
+    # 已去掉“精选 N 个视频”字样
+    assert "精选" not in text
     assert text.count("https://zh.streams.modelapp.org/JUJU8030") == 1  # 只写一次链接
+    assert text.endswith("#模特 #视频")
+
+
+def test_build_group_text_no_username_fallback():
+    docs = [{"model": {}, "title": "x", "video_id": 1}]
+    text = pm.build_group_text(docs)
+    assert "精选视频分享" in text
+    assert "https://" not in text
 
 
 def test_select_next_model_picks_oldest_pending_model():

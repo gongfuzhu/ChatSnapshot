@@ -238,15 +238,17 @@ def build_text_for(doc):
 
 
 def build_group_text(docs):
-    """一条多视频推文的文案：同一模特的 N 个视频，只写一次模特名与直播链接。"""
+    """一条多视频推文的文案：同一模特的多个视频，只写一次模特名与直播链接。"""
     if not docs:
         return "精选视频分享\n#模特 #视频"
     first = docs[0]
     username = ((first.get("model") or {}).get("username") or "").strip()
-    parts = [f"精选 {len(docs)} 个视频"]
+    parts = []
     if username:
         parts.append(f"模特：{username}")
         parts.append(LIVE_URL.replace("{username}", username))
+    if not parts:
+        parts.append("精选视频分享")
     parts.append("#模特 #视频")
     return "\n".join(parts)
 
