@@ -42,6 +42,10 @@ MAX_VIDEO_SECONDS = 140
 FFMPEG_MARGIN = 120
 
 
+class ExpiredLinkError(RuntimeError):
+    """视频链接已失效（HLS 签名过期，服务端返回 410 Gone）。"""
+
+
 def log(msg):
     print(f"[model-x] {msg}")
 
@@ -85,7 +89,13 @@ def download_video(url, out_path, max_seconds=MAX_VIDEO_SECONDS):
             os.remove(out_path)
         raise RuntimeError(f"ffmpeg 下载超时(>{timeout}s): {url[:80]}")
     if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg 下载失败: {result.stderr[-400:]}")
+        stderr = result.stderr or ""
+        # HLS 签名过期：服务端对 master.m3u8 返回 410 Gone（ffmpeg rc=8）
+        if "410 Gone" in stderr or "4XX Client Error" in stderr and "410" in stderr:
+            if os.path.exists(out_path):
+                os.remove(out_path)
+            raise ExpiredLinkError(f"视频链接已失效(410 Gone): {url[:80]}")
+        raise RuntimeError(f"ffmpeg 下载失败: {stderr[-400:]}")
     if not os.path.exists(out_path) or os.path.getsize(out_path) < 10 * 1024:
         raise RuntimeError(f"下载结果异常（文件过小或不存在）: {out_path}")
     # 复用录制链路的冻结帧质检（发现问题自动 CFR 修复，不阻断）
@@ -107,6 +117,11 @@ def mark_published(col, video_id):
         {"$set": {"x_published": True,
                   "x_published_at": datetime.now(timezone.utc).isoformat()}},
     )
+
+
+def delete_expired(col, video_id):
+    """链接失效(410)的视频直接从库中删除，避免反复占用发布队列。"""
+    return col.delete_one({"video_id": video_id})
 
 
 def build_text_for(doc):
@@ -164,37 +179,87 @@ def main():
     ap = argparse.ArgumentParser(description="发布 approved 模特视频到 X 并回写已发布标记")
     ap.add_argument("--limit", type=int, default=1, help="本次最多发布几条（默认 1）")
     ap.add_argument("--video-id", type=int, default=None, help="只处理指定 video_id")
-    ap.add_argument("--dry-run", action="store_true", help="只下载验证，不发帖不回写")
+    ap.add_argument("--dry-run", action="store_true", help="只下载验证，不发帖不回写不删除")
     args = ap.parse_args()
 
     client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=12000)
     col = client[MONGO_DB][MONGO_COLLECTION]
     col.create_index([("publish_status", ASCENDING), ("x_published", ASCENDING)])
 
-    docs = find_pending(col, limit=args.limit, video_id=args.video_id)
-    if not docs:
-        log("没有待发布的 approved 视频（全部已发布或尚未标注）")
+    # 指定单条模式：不做「换下一条」，仅处理该 video_id
+    if args.video_id is not None:
+        docs = find_pending(col, limit=1, video_id=args.video_id)
+        if not docs:
+            log(f"video_id={args.video_id} 不在可发布候选中（不存在/非approved/已发布）")
+            return
+        _process_one(col, docs[0], args, allow_skip=False)
         return
-    log(f"本次候选 {len(docs)} 条")
 
+    # dry-run：只验证队列第一条，不发帖不删除，处理完即结束
+    if args.dry_run:
+        first = find_pending(col, limit=1)
+        if not first:
+            log("没有待发布的 approved 视频（全部已发布或尚未标注）")
+            return
+        _process_one(col, first[0], args, allow_skip=False)
+        return
+
+    # 队列模式：失效即删除并自动换下一条，直到发够 limit 或候选耗尽
     done = 0
-    for doc in docs:
-        vid = doc["video_id"]
-        out_path = f"modelx_{vid}.mp4"
-        try:
-            published = publish_one(doc, dry_run=args.dry_run)
-            if published:
-                mark_published(col, vid)
-                log(f"视频 {vid} 已发布并回写 x_published=true")
-                done += 1
-        except Exception as e:  # 单条失败不影响后续，且不回写、下次仍可重试
-            log(f"视频 {vid} 处理失败: {e}")
-        finally:
-            # 正式发布后清理临时文件；dry-run 保留供检查
-            if not args.dry_run and os.path.exists(out_path):
-                os.remove(out_path)
-                log(f"已删除临时文件 {out_path}")
-    log(f"结束：成功发布 {done}/{len(docs)} 条")
+    expired = 0
+    failed = 0
+    tried = set()          # 本轮已处理过的 video_id，避免重复取
+    guard = 0              # 安全阀，防止异常情况下无限循环
+    max_attempts = args.limit + 200
+    while done < args.limit and guard < max_attempts:
+        guard += 1
+        # 每次现取队列头部，跳过本轮已试过的
+        batch = find_pending(col, limit=args.limit + len(tried) + 5)
+        candidates = [d for d in batch if d["video_id"] not in tried]
+        if not candidates:
+            break
+        doc = candidates[0]
+        tried.add(doc["video_id"])
+        result = _process_one(col, doc, args, allow_skip=True)
+        if result == "published":
+            done += 1
+        elif result == "expired":
+            expired += 1
+        elif result == "failed":
+            failed += 1
+
+    log(f"结束：成功发布 {done} 条 | 失效删除 {expired} 条 | 其他失败 {failed} 条")
+
+
+def _process_one(col, doc, args, allow_skip):
+    """处理单条，返回 'published' / 'expired' / 'failed' / 'dryrun'。"""
+    vid = doc["video_id"]
+    out_path = f"modelx_{vid}.mp4"
+    try:
+        published = publish_one(doc, dry_run=args.dry_run)
+        if published:
+            mark_published(col, vid)
+            log(f"视频 {vid} 已发布并回写 x_published=true")
+            return "published"
+        return "dryrun"
+    except ExpiredLinkError as e:
+        log(f"视频 {vid} 链接失效: {e}")
+        if args.dry_run:
+            log("[dry-run] 不删除该条，仅报告失效")
+            return "expired"
+        res = delete_expired(col, vid)
+        log(f"已从库中删除失效视频 {vid}（删除 {res.deleted_count} 条），自动换下一条")
+        if not allow_skip:
+            log("指定单条模式，无下一条可换")
+        return "expired"
+    except Exception as e:  # 其他失败不删除、不回写，下次仍可重试
+        log(f"视频 {vid} 处理失败: {e}")
+        return "failed"
+    finally:
+        # 正式发布后清理临时文件；dry-run 保留供检查
+        if not args.dry_run and os.path.exists(out_path):
+            os.remove(out_path)
+            log(f"已删除临时文件 {out_path}")
 
 
 if __name__ == "__main__":

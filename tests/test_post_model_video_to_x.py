@@ -172,5 +172,181 @@ def test_build_text_for_no_username_has_no_link():
     assert "https://" not in text
 
 
+# ---------- 失效(410)处理：删除并换下一条 ----------
+
+class _DelRes:
+    def __init__(self, n):
+        self.deleted_count = n
+
+
+class FakeDelCol:
+    def __init__(self):
+        self.deleted = []
+        self.updated = []
+
+    def delete_one(self, filt):
+        self.deleted.append(filt["video_id"])
+        return _DelRes(1)
+
+    def update_one(self, filt, update):
+        self.updated.append(filt["video_id"])
+
+    def create_index(self, *a, **k):
+        return None
+
+
+def _args(dry_run=False, limit=1, video_id=None):
+    class A: pass
+    a = A()
+    a.dry_run = dry_run
+    a.limit = limit
+    a.video_id = video_id
+    return a
+
+
+def test_expired_link_error_class_exists():
+    assert issubclass(pm.ExpiredLinkError, RuntimeError)
+
+
+def test_process_one_deletes_expired_in_normal_mode(monkeypatch):
+    col = FakeDelCol()
+
+    def boom(doc, dry_run=False):
+        raise pm.ExpiredLinkError("410 Gone")
+
+    monkeypatch.setattr(pm, "publish_one", boom)
+    monkeypatch.setattr(os.path, "exists", lambda p: False)
+    doc = {"video_id": 9001}
+    result = pm._process_one(col, doc, _args(), allow_skip=True)
+    assert result == "expired"
+    assert col.deleted == [9001]          # 失效即删除
+    assert col.updated == []              # 未回写发布标记
+
+
+def test_process_one_dry_run_reports_expired_but_keeps_data(monkeypatch):
+    col = FakeDelCol()
+
+    def boom(doc, dry_run=False):
+        raise pm.ExpiredLinkError("410 Gone")
+
+    monkeypatch.setattr(pm, "publish_one", boom)
+    monkeypatch.setattr(os.path, "exists", lambda p: False)
+    result = pm._process_one(col, {"video_id": 9002}, _args(dry_run=True), allow_skip=False)
+    assert result == "expired"
+    assert col.deleted == []              # dry-run 绝不删除
+
+
+def test_process_one_published_marks_and_does_not_delete(monkeypatch):
+    col = FakeDelCol()
+    monkeypatch.setattr(pm, "publish_one", lambda doc, dry_run=False: True)
+    monkeypatch.setattr(os.path, "exists", lambda p: False)
+    result = pm._process_one(col, {"video_id": 9003}, _args(), allow_skip=True)
+    assert result == "published"
+    assert col.deleted == []
+    assert col.updated == [9003]          # 成功才回写 x_published
+
+
+def test_process_one_other_failure_keeps_for_retry(monkeypatch):
+    col = FakeDelCol()
+
+    def boom(doc, dry_run=False):
+        raise RuntimeError("网络抖动")
+
+    monkeypatch.setattr(pm, "publish_one", boom)
+    monkeypatch.setattr(os.path, "exists", lambda p: False)
+    result = pm._process_one(col, {"video_id": 9004}, _args(), allow_skip=True)
+    assert result == "failed"
+    assert col.deleted == []              # 非410错误不删除，留待重试
+    assert col.updated == []
+
+
+def test_download_video_raises_expired_on_410(monkeypatch):
+    class _Proc:
+        returncode = 8
+        stderr = "[https] HTTP error 410 Gone\nError opening input: 4XX Client Error"
+
+    monkeypatch.setattr(pm.shutil, "which", lambda x: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(pm.subprocess, "run", lambda *a, **k: _Proc())
+    monkeypatch.setattr(os.path, "exists", lambda p: False)
+    with pytest.raises(pm.ExpiredLinkError):
+        pm.download_video("https://x/master.m3u8?md5=z", "/tmp/o.mp4")
+
+
+# ---------- main 队列循环：失效删除后自动换下一条 ----------
+
+class _QueueCursor:
+    def __init__(self, docs):
+        self._docs = docs
+
+    def sort(self, *a, **k):
+        return self
+
+    def limit(self, n):
+        return self
+
+    def __iter__(self):
+        return iter(self._docs)
+
+
+class QueueCol(FakeDelCol):
+    """模拟发布队列：前两次取队列返回含失效头部，删除后失效项消失。"""
+    def __init__(self, docs):
+        super().__init__()
+        self._docs = docs
+
+    def find(self, query, *a, **k):
+        return _QueueCursor(list(self._docs))
+
+    def delete_one(self, filt):
+        vid = filt["video_id"]
+        before = len(self._docs)
+        self._docs = [d for d in self._docs if d["video_id"] != vid]
+        self.deleted.append(vid)
+        return _DelRes(before - len(self._docs))
+
+
+def test_main_queue_skips_expired_and_publishes_next(monkeypatch):
+    expired_doc = {"video_id": 7001, "video_url": "https://x/a.m3u8"}
+    good_doc = {"video_id": 7002, "video_url": "https://x/b.mp4"}
+    col = QueueCol([expired_doc, good_doc])
+
+    class _Client:
+        def __init__(self, *a, **k):
+            self._col = col
+
+        def __getitem__(self, db):
+            outer = self
+
+            class _DB:
+                def __getitem__(self_inner, name):
+                    return outer._col
+
+            return _DB()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(pm, "MongoClient", _Client)
+    monkeypatch.setattr(os.path, "exists", lambda p: False)
+
+    calls = []
+
+    def fake_publish(doc, dry_run=False):
+        calls.append(doc["video_id"])
+        if doc["video_id"] == 7001:
+            raise pm.ExpiredLinkError("410 Gone")
+        return True   # 第二条成功
+
+    monkeypatch.setattr(pm, "publish_one", fake_publish)
+    monkeypatch.setattr(sys, "argv", ["post_model_video_to_x.py", "--limit", "1"])
+    pm.main()
+
+    # 失效的被删除，有效的被发布；最终发够 1 条
+    assert col.deleted == [7001]
+    assert col.updated == [7002]          # 只有成功的那条回写发布标记
+    assert calls == [7001, 7002]          # 先试失效项，删除后换了下一条
+    assert all(d["video_id"] != 7001 for d in col._docs)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
