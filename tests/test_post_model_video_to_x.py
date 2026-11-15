@@ -510,9 +510,17 @@ def test_publish_group_skips_expired_and_merges_rest(monkeypatch):
         class chromium:
             @staticmethod
             def connect_over_cdp(url):
-                class B:
-                    contexts = [type("C", (), {"new_page": staticmethod(lambda: object())})()]
-                return B()
+                class _Page:
+                    def close(self_inner):
+                        pass
+
+                class _Ctx:
+                    pages = []
+                    @staticmethod
+                    def new_page():
+                        return _Page()
+
+                return type("B", (), {"contexts": [_Ctx()]})()
 
     monkeypatch.setattr(pm, "sync_playwright", lambda: _PW())
     monkeypatch.setattr(pm, "upload_media_to_x", fake_upload)

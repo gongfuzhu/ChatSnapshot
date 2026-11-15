@@ -406,14 +406,28 @@ def publish_group(col, docs, dry_run=False):
     post_text = build_group_text(ok_docs, topic=_group_topic(ok_docs))
     log(f"多视频推文文案:\n{post_text}")
     proc, started_by_us = ensure_browser(port=DEBUG_PORT)
+    page = None
     try:
         with sync_playwright() as p:
             browser = p.chromium.connect_over_cdp(f"http://127.0.0.1:{DEBUG_PORT}")
             context = browser.contexts[0]
+            # 清理历史失败可能残留的发帖标签页，避免标签页泄漏拖垮低内存机器上的浏览器
+            for stale in list(context.pages):
+                try:
+                    if "x.com/compose/post" in (stale.url or ""):
+                        stale.close()
+                except Exception:  # noqa: BLE001
+                    pass
             page = context.new_page()
             # 一次选中多个视频，作为同一条推文的多个附件
             upload_media_to_x(page, paths, post_text)
     finally:
+        # 无论成功失败都关闭本次标签页，杜绝标签页泄漏
+        if page is not None:
+            try:
+                page.close()
+            except Exception:  # noqa: BLE001
+                pass
         if started_by_us and proc is not None:
             proc.terminate()
             log("已关闭本脚本启动的 Chrome")

@@ -386,16 +386,29 @@ def upload_media_to_x(page, media_path, post_text=""):
 
     # 上传媒体（多文件一次选中，合并到同一条推文）
     page.wait_for_selector('input[type="file"]', timeout=10000)
-    file_input = page.locator('input[type="file"]').first
-
-    # 用绝对路径，避免工作目录问题
+    # X 的 file input 是 opacity:0、近零尺寸的隐藏元素，且视频文件较大(可达数十MB)；
+    # Playwright 的 Locator/ElementHandle.set_input_files 带可操作性+事件等待，对此场景会
+    # 稳定超时（文件其实已进推文但调用方收到 TimeoutError）。改用 CDP 原生 DOM.setFileInputFiles，
+    # 完全绕过动作检查，单/多文件均通过 files 数组一次设置。
     for ap in media_paths:
         if not os.path.exists(ap):
             raise FileNotFoundError(f"待上传媒体不存在: {ap}")
     print(f"上传媒体 {len(media_paths)} 个: "
           f"{[os.path.basename(p) for p in media_paths]}")
-    # set_input_files 接受路径列表，X 会把它们作为同一条推文的多个附件
-    file_input.set_input_files(media_paths if len(media_paths) > 1 else media_paths[0])
+    cdp = page.context.new_cdp_session(page)
+    try:
+        root = cdp.send("DOM.getDocument", {"depth": -1, "pierce": True})["root"]["nodeId"]
+        node_id = cdp.send(
+            "DOM.querySelector",
+            {"nodeId": root, "selector": 'input[type="file"]'})["nodeId"]
+        if not node_id:
+            raise RuntimeError("CDP 未找到文件上传 input[type=file] 节点")
+        cdp.send("DOM.setFileInputFiles", {"files": media_paths, "nodeId": node_id})
+    finally:
+        try:
+            cdp.detach()
+        except Exception:  # noqa: BLE001
+            pass
 
     # 等待媒体出现在编辑区（通过检测媒体预览元素）
     print("等待媒体上传完成...")
