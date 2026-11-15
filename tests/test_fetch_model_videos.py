@@ -120,5 +120,63 @@ def test_save_does_not_overwrite_existing_manual_status(shared_col):
         assert "publish_status" not in upd.get("$set", {})
 
 
+# ---------- main 集成：视频 + free 相册协同 ----------
+
+def _patch_common(monkeypatch, album_docs=None, album_raise=False, video_docs=None):
+    monkeypatch.setattr(fm, "fetch_model",
+                        lambda uid, p: {"id": uid, "username": "Emacccc"})
+    monkeypatch.setattr(fm, "collect_for_model",
+                        lambda model, p: (video_docs or [_doc(9001, "approved")], None))
+    monkeypatch.setattr(fm, "save_to_mongo", lambda docs: (len(docs), 0))
+
+    import fetch_model_albums as fa
+    captured = {"save_calls": 0, "fetch_uids": []}
+
+    def fake_fetch(uid, proxies, username=None):
+        captured["fetch_uids"].append((uid, username))
+        if album_raise:
+            raise RuntimeError("albums 接口异常")
+        return (album_docs or [], {"total_albums": 1, "seen": 1,
+                                   "free": len(album_docs or []), "skipped_paid": 0})
+
+    def fake_save(docs):
+        captured["save_calls"] += 1
+        return (len(docs), 0)
+
+    monkeypatch.setattr(fa, "fetch_free_albums", fake_fetch)
+    monkeypatch.setattr(fa, "save_albums_to_mongo", fake_save)
+    monkeypatch.setattr(fa, "save_to_mongo", fake_save)  # 别名指向同函数时一并 mock
+    return captured
+
+
+def test_main_fetches_albums_alongside_videos(monkeypatch):
+    album_doc = {"_id": 777, "album_id": 777, "photos": [{"photo_id": 1}, {"photo_id": 2}]}
+    cap = _patch_common(monkeypatch, album_docs=[album_doc])
+    monkeypatch.setattr(sys, "argv", ["x", "--user-id", "286872565"])
+    rc = fm.main()
+    assert rc == 0
+    assert cap["fetch_uids"] == [(286872565, "Emacccc")]   # 复用了视频流程的 username
+    assert cap["save_calls"] == 1                            # 相册被幂等写库一次
+
+
+def test_main_skip_albums_flag_disables_album_pipeline(monkeypatch):
+    cap = _patch_common(monkeypatch, album_docs=[{"_id": 1}])
+    monkeypatch.setattr(sys, "argv", ["x", "--user-id", "1", "--skip-albums"])
+    rc = fm.main()
+    assert rc == 0
+    assert cap["fetch_uids"] == []                           # 完全没碰相册接口
+    assert cap["save_calls"] == 0
+
+
+def test_main_album_failure_does_not_break_videos(monkeypatch):
+    # 相册接口抛错时，视频仍正常处理、main 正常返回 0
+    cap = _patch_common(monkeypatch, album_raise=True)
+    monkeypatch.setattr(sys, "argv", ["x", "--user-id", "1"])
+    rc = fm.main()
+    assert rc == 0
+    assert cap["fetch_uids"] == [(1, "Emacccc")]
+    assert cap["save_calls"] == 0                            # 相册失败未写库，但未中断流程
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

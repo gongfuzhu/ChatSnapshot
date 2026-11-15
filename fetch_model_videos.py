@@ -269,6 +269,8 @@ def main():
     ap.add_argument("--use-proxy", action="store_true",
                     help="经 mihomo 代理访问（默认直连，接口实测可直连）")
     ap.add_argument("--dry-run", action="store_true", help="只抓取打印，不写数据库")
+    ap.add_argument("--skip-albums", action="store_true",
+                    help="只抓视频，不抓取模特 free 相册图片元数据（默认视频+相册一起抓）")
     args = ap.parse_args()
 
     proxies = None
@@ -284,7 +286,15 @@ def main():
         uids = args.user_id or [DEFAULT_USER_ID]
         models = [fetch_model(uid, proxies) for uid in uids]
 
+    # 延迟导入避免循环依赖：fetch_model_albums 复用本模块的请求函数
+    album_mod = None
+    if not args.skip_albums:
+        from fetch_model_albums import fetch_free_albums, save_albums_to_mongo
+        album_mod = {"fetch_free_albums": fetch_free_albums,
+                     "save_albums_to_mongo": save_albums_to_mongo}
+
     all_docs, empty, failed = [], 0, []
+    album_docs, album_photos, album_failed = [], 0, []
     for i, model in enumerate(models, 1):
         uid = model.get("id")
         uname = model.get("username") or "(无用户名)"
@@ -292,35 +302,58 @@ def main():
         docs, err = collect_for_model(model, proxies)
         if err:
             failed.append((uname, err))
-            log(f"  [跳过] 抓取失败：{err}")
-            continue
-        if not docs:
+            log(f"  [跳过] 视频抓取失败：{err}")
+        elif docs:
+            for d in docs:
+                log(f"  视频 {d['video_id']} [{d['access_mode']}] -> {d['url_field']} "
+                    f"| {d['title'][:24]}")
+            all_docs.extend(docs)
+        else:
             empty += 1
-            log("  无视频，跳过")
-            continue
-        for d in docs:
-            log(f"  视频 {d['video_id']} [{d['access_mode']}] -> {d['url_field']} "
-                f"| {d['title'][:24]}")
-        all_docs.extend(docs)
+            log("  无视频")
+
+        # 无论有无视频，都顺带抓 free 相册图片元数据；失败不影响视频主流程
+        if album_mod is not None:
+            try:
+                a_docs, a_stats = album_mod["fetch_free_albums"](uid, proxies, username=uname)
+                if a_docs:
+                    album_docs.extend(a_docs)
+                    n_photos = sum(len(d["photos"]) for d in a_docs)
+                    album_photos += n_photos
+                    log(f"  free 相册 {a_stats['free']} 个、图片 {n_photos} 张"
+                        f"（跳过付费 {a_stats['skipped_paid']}）")
+            except Exception as e:  # noqa: BLE001
+                album_failed.append((uname, f"{type(e).__name__}: {str(e)[:80]}"))
+                log(f"  [相册抓取失败，不影响视频] {type(e).__name__}: {str(e)[:80]}")
 
     log(f"统计：模特 {len(models)} 个 | 有视频并入库候选 {len(models)-empty-len(failed)} 个 "
         f"| 无视频 {empty} 个 | 失败 {len(failed)} 个 | 视频文档 {len(all_docs)} 条")
     if failed:
         log("失败明细：" + "；".join(f"{n}({e})" for n, e in failed[:10]))
+    if album_failed:
+        log("相册失败明细（不影响视频）：" + "；".join(f"{n}({e})" for n, e in album_failed[:10]))
 
     if args.dry_run:
         log("[dry-run] 不写库。")
         if all_docs:
             import json
             print(json.dumps(all_docs[0], ensure_ascii=False, indent=1))
+        if album_docs:
+            log(f"[dry-run] 另解析 free 相册 {len(album_docs)} 个、图片 {album_photos} 张，未写库")
         return 0
 
-    if not all_docs:
-        log("没有可写入的视频文档，结束。")
-        return 0
+    # 视频写库
+    if all_docs:
+        inserted, updated = save_to_mongo(all_docs)
+        log(f"✅ 写入 {MONGO_DB}.{MONGO_COLLECTION}：新增 {inserted} 条，更新 {updated} 条")
+    else:
+        log("没有可写入的视频文档。")
 
-    inserted, updated = save_to_mongo(all_docs)
-    log(f"✅ 写入 {MONGO_DB}.{MONGO_COLLECTION}：新增 {inserted} 条，更新 {updated} 条")
+    # free 相册元数据写库（独立于视频，只要本轮收集到就幂等写入）
+    if album_mod is not None and album_docs:
+        a_ins, a_upd = album_mod["save_albums_to_mongo"](album_docs)
+        log(f"✅ 写入 {MONGO_DB}.model_albums：新增相册 {a_ins} 个，更新 {a_upd} 个，"
+            f"free 图片 {album_photos} 张")
     return 0
 
 

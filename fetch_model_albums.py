@@ -110,9 +110,14 @@ def album_to_document(album, user_id, username):
     }
 
 
-def fetch_free_albums(user_id, proxies):
-    """翻页抓取某模特的全部 free 相册（付费相册跳过）。返回 (docs, stats)。"""
-    username = fetch_username(user_id, proxies)
+def fetch_free_albums(user_id, proxies, username=None):
+    """翻页抓取某模特的全部 free 相册（付费相册跳过）。返回 (docs, stats)。
+
+    username 可由调用方（如视频抓取流程）直接传入以省去一次 users 详情请求；
+    不传则自行查询，查询失败降级为空串，不阻断。
+    """
+    if username is None:
+        username = fetch_username(user_id, proxies)
     docs, offset = [], 0
     total_items = None
     seen_albums = 0
@@ -203,6 +208,10 @@ def main():
         log(f"[dry-run] 结束，共解析 free 图片 {grand_photos} 张，未写库")
     else:
         log(f"全部结束：新增相册 {grand_new} / 更新相册 {grand_upd} / free 图片 {grand_photos} 张")
+
+
+# 供视频抓取流程集成时使用的语义化别名（见 fetch_model_videos.main）
+save_albums_to_mongo = save_to_mongo
 
 
 if __name__ == "__main__":
