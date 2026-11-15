@@ -24,7 +24,13 @@ from pymongo import ASCENDING, MongoClient
 from playwright.sync_api import sync_playwright
 
 from model_db_config import MONGO_URI, MONGO_DB, MONGO_COLLECTION
-from fetch_model_videos import fetch_all_videos, pick_video_url
+from fetch_model_videos import (
+    API_BASE,
+    build_headers,
+    fetch_all_videos,
+    get_json,
+    pick_video_url,
+)
 from upload_grid_to_x import (
     DEBUG_PORT,
     LIVE_URL,
@@ -237,13 +243,49 @@ def build_text_for(doc):
     return "\n".join(parts)
 
 
-def build_group_text(docs):
-    """一条多视频推文的文案：同一模特的多个视频，只写一次模特名与直播链接。"""
+def fetch_cam_topic(user_id):
+    """实时查模特当前直播间话题 cam.topic。
+
+    接口：GET /api/front/v2/models/{user_id}/cam -> {"cam": {"topic": ...}}。
+    仅当 cam.isCamActive 且 topic 非空白时返回文本；其余情况（下播/未设话题/接口异常）
+    一律返回 None，绝不阻断发布流程。
+    """
+    if not user_id:
+        return None
+    url = f"{API_BASE}/models/{user_id}/cam"
+    try:
+        data = get_json(url, build_headers(user_id), None)
+    except Exception as e:  # noqa: BLE001
+        log(f"查询 cam.topic 失败(user_id={user_id})：{type(e).__name__}，文案回退不带话题")
+        return None
+    cam = (data or {}).get("cam") or {}
+    if not cam.get("isCamActive"):
+        return None
+    topic = (cam.get("topic") or "").strip()
+    return topic or None
+
+
+def _group_topic(docs):
+    """取一组视频所属模特的当前直播话题（同一模特，user_id 相同）。查不到返回 None。"""
+    for d in docs:
+        uid = d.get("user_id") or (d.get("model") or {}).get("id")
+        if uid:
+            return fetch_cam_topic(uid)
+    return None
+
+
+def build_group_text(docs, topic=None):
+    """一条多视频推文的文案：同一模特的多个视频，只写一次模特名与直播链接。
+
+    topic 为实时查询到的 cam.topic（直播话题），有值时放在最前；为空则不带。
+    """
     if not docs:
         return "精选视频分享\n#模特 #视频"
     first = docs[0]
     username = ((first.get("model") or {}).get("username") or "").strip()
     parts = []
+    if topic:
+        parts.append(clean_topic(topic))
     if username:
         parts.append(f"模特：{username}")
         parts.append(LIVE_URL.replace("{username}", username))
@@ -355,11 +397,13 @@ def publish_group(col, docs, dry_run=False):
         return result
 
     if dry_run:
+        preview = build_group_text(ok_docs, topic=_group_topic(ok_docs))
         log(f"[dry-run] 已下载 {len(paths)} 个视频，将合并为 1 条推文；保留文件: "
             f"{[os.path.basename(p) for p in paths]}")
+        log(f"[dry-run] 将使用文案:\n{preview}")
         return result
 
-    post_text = build_group_text(ok_docs)
+    post_text = build_group_text(ok_docs, topic=_group_topic(ok_docs))
     log(f"多视频推文文案:\n{post_text}")
     proc, started_by_us = ensure_browser(port=DEBUG_PORT)
     try:

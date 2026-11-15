@@ -404,6 +404,62 @@ def test_build_group_text_no_username_fallback():
     assert "https://" not in text
 
 
+def test_build_group_text_with_topic_puts_it_first():
+    docs = [_vdoc(1, "JUJU8030", "2026-01-01")]
+    text = pm.build_group_text(docs, topic="圆脸三分财 不富也镇宅")
+    lines = text.split("\n")
+    assert lines[0] == "圆脸三分财 不富也镇宅"      # 直播话题在最前
+    assert "模特：JUJU8030" in text
+    assert "https://zh.streams.modelapp.org/JUJU8030" in text
+    assert text.endswith("#模特 #视频")
+
+
+def test_build_group_text_empty_topic_omits_line():
+    docs = [_vdoc(1, "JUJU8030", "2026-01-01")]
+    text = pm.build_group_text(docs, topic=None)
+    assert text.startswith("模特：JUJU8030")
+
+
+# ---------- cam.topic 实时查询 ----------
+
+def test_fetch_cam_topic_returns_text_when_active(monkeypatch):
+    monkeypatch.setattr(pm, "get_json", lambda url, h, p: {
+        "cam": {"isCamActive": True, "topic": "  直播中  "}})
+    assert pm.fetch_cam_topic(123) == "直播中"      # 去空白
+
+
+def test_fetch_cam_topic_none_when_inactive(monkeypatch):
+    monkeypatch.setattr(pm, "get_json", lambda url, h, p: {
+        "cam": {"isCamActive": False, "topic": "下播话题"}})
+    assert pm.fetch_cam_topic(123) is None
+
+
+def test_fetch_cam_topic_none_when_blank(monkeypatch):
+    monkeypatch.setattr(pm, "get_json", lambda url, h, p: {
+        "cam": {"isCamActive": True, "topic": "   "}})
+    assert pm.fetch_cam_topic(123) is None
+
+
+def test_fetch_cam_topic_none_on_error(monkeypatch):
+    def boom(url, h, p):
+        raise RuntimeError("网络错误")
+    monkeypatch.setattr(pm, "get_json", boom)
+    assert pm.fetch_cam_topic(123) is None          # 接口异常不阻断
+
+
+def test_fetch_cam_topic_none_without_user_id():
+    assert pm.fetch_cam_topic(None) is None
+
+
+def test_group_topic_uses_user_id(monkeypatch):
+    seen = []
+    monkeypatch.setattr(pm, "fetch_cam_topic",
+                        lambda uid: (seen.append(uid), "话题")[1])
+    docs = [{"user_id": 284854055, "model": {"id": 284854055}}]
+    assert pm._group_topic(docs) == "话题"
+    assert seen == [284854055]
+
+
 def test_select_next_model_picks_oldest_pending_model():
     col = FakeCol([
         _vdoc(1, "B", "2026-03-01"),
