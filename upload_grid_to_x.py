@@ -15,7 +15,7 @@ import sys
 import time
 from datetime import datetime
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Error as PlaywrightError, sync_playwright
 
 from snapshot_grid import (
     GRID,
@@ -304,6 +304,36 @@ class XLoginExpiredError(RuntimeError):
     """X 登录态失效（跳转到登录页），需要人工重新登录。"""
 
 
+# 未登录时 X 对 /home 等页面可能返回非 HTML 响应，浏览器当作下载，Playwright 抛此错误
+_DOWNLOAD_HINT = "Download is starting"
+
+
+def _goto_with_retry(page, url, wait_until="domcontentloaded", retries=2, delay=4):
+    """带重试的页面导航。
+
+    - 「Download is starting」本质是登录态失效的副作用，直接归类为 XLoginExpiredError，
+      让上层告警准确提示重新登录，而不是报模糊的通用异常。
+    - 其余导航异常（网络抖动/代理瞬断）按重试次数退避重试，避免偶发问题直接导致整轮失败。
+    """
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            page.goto(url, wait_until=wait_until, timeout=30000)
+            return
+        except PlaywrightError as e:
+            msg = str(e)
+            if _DOWNLOAD_HINT in msg:
+                raise XLoginExpiredError(
+                    f"导航 {url} 触发下载响应（{_DOWNLOAD_HINT}），通常是 X 登录态失效，"
+                    f"请重新登录 X。原始错误: {msg[:120]}"
+                ) from e
+            last_err = e
+            if attempt < retries:
+                print(f"[信息] 导航 {url} 失败({type(e).__name__})，{delay}s 后重试 {attempt+2}/{retries+1}")
+                page.wait_for_timeout(delay * 1000)
+    raise RuntimeError(f"导航 {url} 重试 {retries+1} 次仍失败: {last_err}")
+
+
 def upload_media_to_x(page, media_path, post_text=""):
     """在给定页面上传媒体（图片或视频）并发布。post_text 为最终文案（已完成占位符替换）。
 
@@ -318,11 +348,11 @@ def upload_media_to_x(page, media_path, post_text=""):
     if not media_paths:
         raise ValueError("upload_media_to_x 需要至少一个媒体文件")
     # 先去首页，确保登录态正常、页面完全加载，避免直接跳发帖页时状态异常
-    page.goto("https://x.com/home", wait_until="domcontentloaded")
+    _goto_with_retry(page, "https://x.com/home")
     page.wait_for_timeout(3000)
     print("已进入首页")
 
-    page.goto("https://x.com/compose/post")
+    _goto_with_retry(page, "https://x.com/compose/post")
     print("已打开发帖页面")
     page.wait_for_timeout(2000)
 

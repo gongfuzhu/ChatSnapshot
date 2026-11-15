@@ -34,6 +34,7 @@ from fetch_model_videos import (
 from upload_grid_to_x import (
     DEBUG_PORT,
     LIVE_URL,
+    XLoginExpiredError,
     ensure_browser,
     upload_media_to_x,
 )
@@ -495,7 +496,12 @@ def main():
             continue
         log(f"本轮模特：{username or '(无名)'}，待发 {len(group)} 条"
             f"（free {sum(1 for d in group if d.get('access_mode') == 'free')} 条），合并为 1 条推文")
-        res = publish_group(col, group, dry_run=False)
+        try:
+            res = publish_group(col, group, dry_run=False)
+        except XLoginExpiredError as e:
+            # 登录态失效：明确告警并以非零码退出，cron 据此提示人工重新登录；数据未回写，下轮自动重试
+            log(f"X 登录态失效，本轮终止（未回写任何视频，重新登录后下轮自动重试）: {e}")
+            raise SystemExit(2)
         expired_total += len(res["expired_vids"])
         failed_total += len(res["failed_vids"])
         if res["posted"]:
